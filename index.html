@@ -81,10 +81,12 @@ const CHAR = {
   TELE: U("fed9"),   // notify telemetry
   HAND: U("feda"),   // write  handshake (0x01 then 0x03)
 };
-// Cast a wide net so Chrome will let us enumerate whatever service holds these chars.
-const OPTIONAL_SERVICES = [];
+// CONFIRMED on Rohit's unit (nRF Connect, 2026-07-10): parent service = 0x00FF, holding
+// FED0(move)/FED1(head)/FED8(batt)/FEDA(handshake) + FE00/FED2-7/FEDF/FEE0/FEF0 extras.
+// Keep a wide net too, in case firmware differs.
+const OPTIONAL_SERVICES = [U("00ff")];
 for (let b = 0xfe00; b <= 0xffff; b += 0x10) OPTIONAL_SERVICES.push(U(b.toString(16).padStart(4,"0")));
-[0x180f,0x1801,0x1800,0xffe0,0xfff0].forEach(x=>OPTIONAL_SERVICES.push(U(x.toString(16).padStart(4,"0"))));
+[0x00ff,0x180f,0x1801,0x1800,0xffe0,0xfff0].forEach(x=>OPTIONAL_SERVICES.push(U(x.toString(16).padStart(4,"0"))));
 
 // ---- State ----
 let device=null, server=null, chars={}, drive={s:0,t:0};
@@ -114,7 +116,7 @@ $("connect").onclick = async () => {
     log(`selected: ${device.name || "(no name)"} [${device.id}]`, "ok");
     device.addEventListener("gattserverdisconnected", onDisconnect);
     setStatus("connecting…");
-    server = await device.gatt.connect();
+    server = await connectWithRetry(device, 4);   // Android throws spurious GATT-133 on first try
     log("GATT connected", "ok");
     setStatus("connected");
     $("connect").disabled = true; $("disconnect").disabled = false;
@@ -122,6 +124,18 @@ $("connect").onclick = async () => {
     await mapCharacteristics();
   } catch (e) { log("connect failed: " + e.message, "err"); setStatus("error"); }
 };
+
+// Retry GATT connect — Android BLE loves to fail the first attempt (error 133).
+async function connectWithRetry(dev, tries) {
+  for (let i = 1; i <= tries; i++) {
+    try { return await dev.gatt.connect(); }
+    catch (e) {
+      log(`connect attempt ${i}/${tries} failed: ${e.message}`, "warn");
+      if (i === tries) throw e;
+      await new Promise(r => setTimeout(r, 400));
+    }
+  }
+}
 
 // Walk every allowed service, index characteristics we care about by UUID.
 async function mapCharacteristics() {
