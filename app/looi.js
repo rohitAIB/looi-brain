@@ -84,7 +84,9 @@ export class Looi extends EventTarget {
   async _handshake() {
     const h = this.chars[CHAR.HAND];
     await h.writeValue(Uint8Array.of(0x01));
-    for (const key of ['SENS', 'TELE', 'BATT']) {               // subscribe notifies (incl. battery)
+    // Subscribe ONLY the sensor/telemetry notifies — exactly the config that held 37s in the PoC.
+    // (Battery FED8 notify was the one addition since then; testing whether it caused the ~3s drop.)
+    for (const key of ['SENS', 'TELE']) {
       const c = this.chars[CHAR[key]];
       if (c && c.properties.notify) {
         await c.startNotifications();
