@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>LOOI — Jarvis brain (P2)</title>
+<style>
+  :root { --bg:#05070a; --fg:#e6edf3; --dim:#8b949e; --acc:#3fb950; --blue:#388bfd; --panel:#0d1117; --line:#21262d; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; user-select:none; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,sans-serif; overflow:hidden; }
+  #face { position:fixed; inset:0; width:100%; height:100%; }
+  .bar { position:fixed; left:0; right:0; display:flex; gap:8px; padding:10px 12px; z-index:2; }
+  .top { top:0; }
+  .bottom { bottom:0; flex-direction:column; align-items:center; gap:10px; }
+  button { font:inherit; color:var(--fg); background:rgba(22,27,34,.85); border:1px solid var(--line);
+           border-radius:12px; padding:11px 14px; backdrop-filter:blur(6px); }
+  button:active { background:rgba(33,38,45,.9); }
+  .chip { font-size:12px; color:var(--dim); }
+  #talk { width:88px; height:88px; border-radius:50%; font-size:14px; font-weight:600;
+          background:var(--acc); color:#03130a; border:none; box-shadow:0 6px 24px rgba(63,185,80,.35); }
+  #talk.live { background:var(--blue); box-shadow:0 0 0 8px rgba(56,139,253,.25); animation:pulse 1.2s infinite; }
+  @keyframes pulse { 50% { box-shadow:0 0 0 16px rgba(56,139,253,.08); } }
+  #transcript { position:fixed; bottom:130px; left:0; right:0; text-align:center; padding:0 24px;
+                font-size:17px; color:var(--fg); text-shadow:0 2px 8px #000; z-index:2; min-height:26px; }
+  #status { position:fixed; top:14px; left:0; right:0; text-align:center; font-size:12px; color:var(--dim); z-index:2; }
+  .right { margin-left:auto; }
+  #settings { position:fixed; inset:0; background:rgba(5,7,10,.95); z-index:5; display:none; padding:20px; flex-direction:column; gap:12px; }
+  #settings.show { display:flex; }
+  #settings h2 { font-size:16px; margin:6px 0; }
+  #settings p { font-size:12px; color:var(--dim); margin:0; }
+  #settings input { width:100%; padding:11px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--fg); font:inherit; }
+</style>
+</head>
+<body>
+  <canvas id="face"></canvas>
+  <div id="status">idle</div>
+
+  <div class="bar top">
+    <button id="connect">🤖 Connect robot</button>
+    <button id="gear" class="right">⚙︎</button>
+  </div>
+
+  <div id="transcript"></div>
+
+  <div class="bar bottom">
+    <button id="talk">Hold to<br>talk</button>
+    <span class="chip" id="hint">tap the robot button to give me a body</span>
+  </div>
+
+  <div id="settings">
+    <h2>Brain settings</h2>
+    <p>Optional: a URL that accepts <code>POST {message}</code> and returns <code>{reply}</code> — your keyed
+       LLM proxy (e.g. on the Pi). Leave blank to use built-in command responses only. Stored locally on this
+       phone, never in the page.</p>
+    <input id="endpoint" type="url" placeholder="https://…/brain (optional)" autocomplete="off" />
+    <p>Without an endpoint I still obey movement commands: “spin”, “come here”, “back up”, “nod”, “shake”, “look around”, “dance”.</p>
+    <button id="closeSettings">Done</button>
+  </div>
+
+<script type="module">
+import { Looi }  from './looi.js';
+import { Face }  from './face.js';
+import { Voice } from './voice.js';
+
+const $ = id => document.getElementById(id);
+const face  = new Face($('face'));  face.start();
+const voice = new Voice();
+const looi  = new Looi();
+
+let state = 'idle';
+const setStatus = t => $('status').textContent = t;
+const setFace = f => face.setExpression(f);
+
+// ---- Robot ----
+looi.addEventListener('connected',    () => { $('connect').textContent = '🤖 Connected'; $('hint').textContent = 'try: “spin”, “come here”, “nod”'; face.setExpression('happy'); voice.speak('Body online.'); });
+looi.addEventListener('disconnected', () => { $('connect').textContent = '🤖 Connect robot'; });
+$('connect').onclick = async () => {
+  if (looi.connected) return;
+  setStatus('connecting robot…');
+  try { await looi.connect(); } catch (e) { setStatus('robot: ' + e.message); }
+  setStatus('idle');
+};
+
+// ---- Voice loop ----
+voice.addEventListener('partial', e => $('transcript').textContent = e.detail.text);
+voice.addEventListener('final',   e => { $('transcript').textContent = e.detail.text; handle(e.detail.text); });
+voice.addEventListener('listen-end', () => { if (state === 'listening') { state = 'idle'; setFace('idle'); setStatus('idle'); } });
+voice.addEventListener('error', e => { setStatus('mic: ' + e.detail.msg); state = 'idle'; setFace('idle'); });
+
+// Push-to-talk
+const startTalk = e => { e.preventDefault(); if (state !== 'idle') return; if (!voice.sttSupported) { setStatus('speech recognition unavailable'); return; }
+  state = 'listening'; setFace('listening'); setStatus('listening…'); $('talk').classList.add('live'); $('transcript').textContent = ''; voice.listen(); };
+const endTalk = e => { e.preventDefault(); $('talk').classList.remove('live'); voice.stopListening(); };
+$('talk').addEventListener('touchstart', startTalk, { passive:false });
+$('talk').addEventListener('touchend', endTalk, { passive:false });
+$('talk').addEventListener('mousedown', startTalk);
+$('talk').addEventListener('mouseup', endTalk);
+
+// ---- The "brain": intent → action + speech ----
+async function handle(text) {
+  state = 'thinking'; setFace('thinking'); setStatus('thinking…');
+  const t = text.toLowerCase();
+  const act = (gesture, say, expr = 'speaking') => reply(say, expr, gesture);
+
+  if (/\b(spin|turn around|twirl)\b/.test(t))         return act(() => looi.spin(1), 'Spinning!');
+  if (/\b(come here|come|approach|over here)\b/.test(t)) return act(() => looi.approach(), 'On my way.');
+  if (/\b(back up|back off|move back|reverse)\b/.test(t)) return act(() => looi.recoil(), 'Backing up.');
+  if (/\b(forward|go straight|move forward)\b/.test(t)) return act(() => looi.forward(), 'Going forward.');
+  if (/\b(nod|yes)\b/.test(t))                         return act(() => looi.nod(), 'Yes.', 'happy');
+  if (/\b(shake|no)\b/.test(t))                        return act(() => looi.shake(), 'No.');
+  if (/\b(look around|scan|where am i)\b/.test(t))     return act(() => looi.lookAround(), 'Looking around.');
+  if (/\b(dance|wiggle|party)\b/.test(t))              return act(() => looi.wiggle(6), 'Dancing!', 'happy');
+  if (/\b(hi|hello|hey|good morning)\b/.test(t))       return reply('Hey! I can move — try telling me to spin or come here.', 'happy');
+  if (/\b(stop|freeze|halt)\b/.test(t))               { looi.stop(); return reply('Stopped.'); }
+
+  // General chat → optional LLM proxy, else honest fallback.
+  const ep = localStorage.getItem('brainEndpoint');
+  if (ep) {
+    try {
+      const r = await fetch(ep, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ message: text }) });
+      const j = await r.json();
+      return reply(j.reply || "I didn't get a reply from my brain.");
+    } catch (e) { return reply('My reasoning brain is unreachable right now.'); }
+  }
+  return reply("My reasoning brain isn't wired up yet — but I can move. Try “spin”, “come here”, or “nod”.");
+}
+
+async function reply(say, expr = 'speaking', gesture = null) {
+  state = 'speaking'; setFace(expr); setStatus('speaking…');
+  if (gesture && looi.connected) { try { gesture(); } catch {} }
+  else if (gesture && !looi.connected) say = "I'd love to, but connect my body first. " ;
+  await voice.speak(say);
+  state = 'idle'; setFace('idle'); setStatus('idle'); $('transcript').textContent = '';
+}
+
+// ---- Settings ----
+$('endpoint').value = localStorage.getItem('brainEndpoint') || '';
+$('gear').onclick = () => $('settings').classList.add('show');
+$('closeSettings').onclick = () => { const v = $('endpoint').value.trim(); v ? localStorage.setItem('brainEndpoint', v) : localStorage.removeItem('brainEndpoint'); $('settings').classList.remove('show'); };
+
+setStatus('idle');
+</script>
+</body>
+</html>
