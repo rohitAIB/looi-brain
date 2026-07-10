@@ -109,19 +109,36 @@ export class Looi extends EventTarget {
   _startHeartbeat() {
     this._stopHeartbeat();
     const move = this.chars[CHAR.MOVE];
+    const batt = this.chars[CHAR.BATT];
     const write = move.writeValueWithoutResponse ? move.writeValueWithoutResponse.bind(move) : move.writeValue.bind(move);
-    this._hb = { ok: 0, err: 0, maxGap: 0, last: performance.now() };
+    this._reading = false;
+    this._hb = { ok: 0, err: 0, maxGap: 0, last: performance.now(), batt: '-' };
+
     this._moveTimer = setInterval(() => {
+      if (this._reading) return;                                        // yield the radio to the battery read
       const now = performance.now(), gap = now - this._hb.last; this._hb.last = now;
-      if (gap > this._hb.maxGap) this._hb.maxGap = gap;                 // how badly the timer slipped
+      if (gap > this._hb.maxGap) this._hb.maxGap = gap;
       write(Uint8Array.of(this._drive.s & 0xff, this._drive.t & 0xff)).then(() => this._hb.ok++).catch(() => this._hb.err++);
     }, HEARTBEAT_MS);
+
+    // FED8 battery read every 4s IS part of the keepalive — the base disconnects if it stops seeing it.
+    if (batt && batt.properties.read) {
+      this._battTimer = setInterval(async () => {
+        this._reading = true;
+        try { const v = await batt.readValue(); this._hb.batt = v.getUint8(0); this.dispatchEvent(new CustomEvent('battery', { detail: { value: v.getUint8(0) } })); }
+        catch { this._hb.batt = 'err'; }
+        this._reading = false;
+      }, 4000);
+    }
+
     this._hbReport = setInterval(() => {                                 // 1/s cadence report → telemetry
-      this._log(`hb: ${this._hb.ok}/s ok, ${this._hb.err} err, maxgap ${Math.round(this._hb.maxGap)}ms`, this._hb.err || this._hb.maxGap > 120 ? 'warn' : '');
+      this._log(`hb: ${this._hb.ok}/s ok, ${this._hb.err} err, maxgap ${Math.round(this._hb.maxGap)}ms, batt=${this._hb.batt}`, this._hb.err || this._hb.maxGap > 120 ? 'warn' : '');
       this._hb.ok = this._hb.err = this._hb.maxGap = 0;
     }, 1000);
   }
-  _stopHeartbeat() { if (this._moveTimer) clearInterval(this._moveTimer); if (this._hbReport) clearInterval(this._hbReport); this._moveTimer = this._hbReport = null; }
+  _stopHeartbeat() {
+    for (const t of ['_moveTimer', '_hbReport', '_battTimer']) if (this[t]) { clearInterval(this[t]); this[t] = null; }
+  }
 
   _onDisconnect() {
     this._stopHeartbeat();
