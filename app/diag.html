@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LOOI — bare connection diagnostic</title>
+<style>
+  body { margin:0; background:#05070a; color:#e6edf3; font:15px/1.5 system-ui,sans-serif; padding:16px; }
+  button { font:inherit; color:#fff; background:#3fb950; border:none; border-radius:12px; padding:16px 20px; font-weight:600; width:100%; }
+  h1 { font-size:16px; } .dim { color:#8b949e; font-size:13px; }
+  #log { background:#010409; border:1px solid #21262d; border-radius:8px; padding:10px; margin-top:14px;
+         font:11px/1.5 ui-monospace,monospace; height:300px; overflow-y:auto; white-space:pre-wrap; color:#8b949e; }
+  #log .ok{color:#3fb950} #log .warn{color:#d29922} #log .err{color:#f85149}
+</style>
+</head>
+<body>
+  <h1>LOOI bare connection test</h1>
+  <p class="dim">Connect + heartbeat only — NO face, NO voice, NO auto-reconnect. This is ~the config that held
+     37s. If it drops here too, the cause is outside our app (another Bluetooth app holding the robot).</p>
+  <p class="dim"><b>First:</b> force-stop the stock LOOI app AND nRF Connect (recents → swipe away), then toggle Bluetooth off/on.</p>
+  <button id="connect">Connect &amp; hold</button>
+  <div id="log"></div>
+
+<script type="module">
+import { Looi } from './looi.js?v=7';
+
+const DEBUG_TOPIC = 'looi-dbg-r7k39q2x';
+const SESSION = 'DIAG-' + Math.random().toString(36).slice(2, 6);
+const logEl = document.getElementById('log');
+let buf = [];
+function dlog(msg, cls = '') {
+  const stamp = new Date().toLocaleTimeString();
+  const el = document.createElement('div'); if (cls) el.className = cls;
+  el.textContent = `${stamp}  ${msg}`; logEl.appendChild(el); logEl.scrollTop = logEl.scrollHeight;
+  buf.push(`[${SESSION}] ${stamp}  ${msg}`);
+}
+setInterval(() => { if (!buf.length) return; const body = buf.join('\n'); buf = [];
+  fetch(`https://ntfy.sh/${DEBUG_TOPIC}`, { method:'POST', body, headers:{ Priority:'min', Title:SESSION } }).catch(()=>{}); }, 1500);
+
+const looi = new Looi();
+looi.addEventListener('log', e => dlog('ble: ' + e.detail.msg, e.detail.cls));
+looi.addEventListener('connected', () => dlog('CONNECTED — now leave it alone ~25s', 'ok'));
+looi.addEventListener('disconnected', () => dlog('DISCONNECTED (no auto-reconnect in diag)', 'warn'));
+
+document.getElementById('connect').onclick = async () => {
+  dlog(`session ${SESSION} — connecting`);
+  try { await looi.connect(); } catch (e) { dlog('connect failed: ' + e.message, 'err'); }
+};
+dlog('ready. Kill other BT apps first, then Connect & hold.');
+</script>
+</body>
+</html>
