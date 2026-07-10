@@ -29,6 +29,11 @@
   #settings h2 { font-size:16px; margin:6px 0; }
   #settings p { font-size:12px; color:var(--dim); margin:0; }
   #settings input { width:100%; padding:11px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--fg); font:inherit; }
+  #dbg { position:fixed; bottom:0; left:0; right:0; max-height:110px; overflow-y:auto; z-index:4;
+         background:rgba(1,4,9,.82); border-top:1px solid var(--line); padding:6px 10px;
+         font:10px/1.4 ui-monospace,monospace; color:var(--dim); white-space:pre-wrap; display:none; }
+  #dbg.show { display:block; }
+  #dbg .ok{color:var(--acc)} #dbg .warn{color:#d29922} #dbg .err{color:#f85149} #dbg .tx{color:#79c0ff}
 </style>
 </head>
 <body>
@@ -46,6 +51,8 @@
     <button id="talk">Hold to<br>talk</button>
     <span class="chip" id="hint">tap the robot button to give me a body</span>
   </div>
+
+  <div id="dbg"></div>
 
   <div id="settings">
     <h2>Brain settings</h2>
@@ -71,13 +78,40 @@ let state = 'idle';
 const setStatus = t => $('status').textContent = t;
 const setFace = f => face.setExpression(f);
 
+// ---- Debug log (tap the ⚙︎ off / status to toggle) ----
+$('dbg').classList.add('show');
+function dlog(msg, cls = '') {
+  const el = document.createElement('div'); if (cls) el.className = cls;
+  el.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+  $('dbg').appendChild(el); $('dbg').scrollTop = $('dbg').scrollHeight;
+}
+$('status').onclick = () => $('dbg').classList.toggle('show');
+looi.addEventListener('log', e => dlog('ble: ' + e.detail.msg, e.detail.cls));
+
 // ---- Robot ----
-looi.addEventListener('connected',    () => { $('connect').textContent = '🤖 Connected'; $('hint').textContent = 'try: “spin”, “come here”, “nod”'; face.setExpression('happy'); voice.speak('Body online.'); });
-looi.addEventListener('disconnected', () => { $('connect').textContent = '🤖 Connect robot'; });
+let reconnecting = false;
+looi.addEventListener('connected', () => {
+  reconnecting = false;
+  $('connect').textContent = '🤖 Connected'; $('hint').textContent = 'try: “spin”, “come here”, “nod”';
+  dlog('robot CONNECTED', 'ok'); face.setExpression('happy'); voice.speak('Body online.');
+});
+looi.addEventListener('disconnected', async e => {
+  $('connect').textContent = '🤖 Connect robot';
+  dlog(`robot DISCONNECTED (intentional=${e.detail.intentional})`, 'warn');
+  // Auto-reconnect on an unintended drop (reuses the device, no chooser).
+  if (!e.detail.intentional && e.detail.wasConnected && !reconnecting) {
+    reconnecting = true;
+    for (let i = 1; i <= 3 && !looi.connected; i++) {
+      dlog(`auto-reconnect ${i}/3…`, 'tx');
+      try { await looi.reconnect(); } catch (err) { dlog('reconnect failed: ' + err.message, 'err'); await new Promise(r => setTimeout(r, 600)); }
+    }
+    reconnecting = false;
+  }
+});
 $('connect').onclick = async () => {
   if (looi.connected) return;
-  setStatus('connecting robot…');
-  try { await looi.connect(); } catch (e) { setStatus('robot: ' + e.message); }
+  setStatus('connecting robot…'); dlog('connect requested', 'tx');
+  try { await looi.connect(); } catch (e) { setStatus('robot: ' + e.message); dlog('connect error: ' + e.message, 'err'); }
   setStatus('idle');
 };
 
@@ -99,6 +133,7 @@ $('talk').addEventListener('mouseup', endTalk);
 // ---- The "brain": intent → action + speech ----
 async function handle(text) {
   state = 'thinking'; setFace('thinking'); setStatus('thinking…');
+  dlog(`cmd: "${text}"  | robot=${looi.connected ? 'CONNECTED' : 'disconnected'}`, looi.connected ? 'ok' : 'warn');
   const t = text.toLowerCase();
   const act = (gesture, say, expr = 'speaking') => reply(say, expr, gesture);
 

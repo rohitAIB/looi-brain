@@ -51,6 +51,7 @@ export class Looi extends EventTarget {
   // ---- Connection ----
   async connect() {
     if (!navigator.bluetooth) throw new Error('Web Bluetooth unavailable — use Chrome on Android over HTTPS');
+    this._intentional = false;
     this._log('requesting device…');
     this.device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: OPTIONAL_SERVICES });
     this._log(`selected ${this.device.name || '(no name)'}`, 'ok');
@@ -115,13 +116,28 @@ export class Looi extends EventTarget {
 
   _onDisconnect() {
     this._stopHeartbeat();
+    const wasConnected = this.connected;
     this.connected = false;
     this._drive = { s: 0, t: 0 };
+    const intentional = this._intentional; this._intentional = false;
     this._log('disconnected', 'warn');
-    this.dispatchEvent(new Event('disconnected'));
+    this.dispatchEvent(new CustomEvent('disconnected', { detail: { intentional, wasConnected } }));
   }
 
-  disconnect() { if (this.device && this.device.gatt.connected) this.device.gatt.disconnect(); }
+  disconnect() { this._intentional = true; if (this.device && this.device.gatt.connected) this.device.gatt.disconnect(); }
+
+  // Re-establish using the already-chosen device (no chooser — allowed without a user gesture).
+  async reconnect() {
+    if (!this.device) throw new Error('no device to reconnect');
+    for (let i = 1; i <= 4; i++) {
+      try { this.server = await this.device.gatt.connect(); break; }
+      catch (e) { if (i === 4) throw e; await sleep(400); }
+    }
+    await this._map();
+    await this._handshake();
+    this.connected = true;
+    this.dispatchEvent(new Event('connected'));
+  }
 
   // ---- Primitives ----
   // Set the drive vector; the heartbeat re-sends it every 30ms until changed. speed/turn: -127..127.
