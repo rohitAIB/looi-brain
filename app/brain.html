@@ -65,9 +65,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js';
-import { Face }  from './face.js';
-import { Voice } from './voice.js';
+import { Looi }  from './looi.js?v=5';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=5';
+import { Voice } from './voice.js?v=5';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
