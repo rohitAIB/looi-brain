@@ -46,11 +46,14 @@ export class Face {
       this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
     resize(); window.addEventListener('resize', resize);
-    let last = performance.now();
+    const FRAME = 1000 / 30;                       // throttle to ~30fps to leave the main thread
+    let last = performance.now();                  // free for the 30ms BLE heartbeat
     const loop = (now) => {
-      const dt = Math.min(50, now - last); last = now;
-      this._update(dt); this._draw();
       this._raf = requestAnimationFrame(loop);
+      const dt = now - last;
+      if (dt < FRAME) return;
+      last = now;
+      this._update(Math.min(50, dt)); this._draw();
     };
     this._raf = requestAnimationFrame(loop);
   }

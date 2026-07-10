@@ -108,11 +108,18 @@ export class Looi extends EventTarget {
     this._stopHeartbeat();
     const move = this.chars[CHAR.MOVE];
     const write = move.writeValueWithoutResponse ? move.writeValueWithoutResponse.bind(move) : move.writeValue.bind(move);
+    this._hb = { ok: 0, err: 0, maxGap: 0, last: performance.now() };
     this._moveTimer = setInterval(() => {
-      write(Uint8Array.of(this._drive.s & 0xff, this._drive.t & 0xff)).catch(() => {});
+      const now = performance.now(), gap = now - this._hb.last; this._hb.last = now;
+      if (gap > this._hb.maxGap) this._hb.maxGap = gap;                 // how badly the timer slipped
+      write(Uint8Array.of(this._drive.s & 0xff, this._drive.t & 0xff)).then(() => this._hb.ok++).catch(() => this._hb.err++);
     }, HEARTBEAT_MS);
+    this._hbReport = setInterval(() => {                                 // 1/s cadence report → telemetry
+      this._log(`hb: ${this._hb.ok}/s ok, ${this._hb.err} err, maxgap ${Math.round(this._hb.maxGap)}ms`, this._hb.err || this._hb.maxGap > 120 ? 'warn' : '');
+      this._hb.ok = this._hb.err = this._hb.maxGap = 0;
+    }, 1000);
   }
-  _stopHeartbeat() { if (this._moveTimer) clearInterval(this._moveTimer); this._moveTimer = null; }
+  _stopHeartbeat() { if (this._moveTimer) clearInterval(this._moveTimer); if (this._hbReport) clearInterval(this._hbReport); this._moveTimer = this._hbReport = null; }
 
   _onDisconnect() {
     this._stopHeartbeat();
