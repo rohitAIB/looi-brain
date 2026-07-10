@@ -84,7 +84,7 @@ const CHAR = {
 // CONFIRMED on Rohit's unit (nRF Connect, 2026-07-10): parent service = 0x00FF, holding
 // FED0(move)/FED1(head)/FED8(batt)/FEDA(handshake) + FE00/FED2-7/FEDF/FEE0/FEF0 extras.
 // Keep a wide net too, in case firmware differs.
-const OPTIONAL_SERVICES = [U("00ff")];
+const OPTIONAL_SERVICES = [U("00ff"), "6e400001-b5a3-f393-e0a9-e50e24dcff00"]; // FEDx svc + NUS-style FF01/FF02 svc
 for (let b = 0xfe00; b <= 0xffff; b += 0x10) OPTIONAL_SERVICES.push(U(b.toString(16).padStart(4,"0")));
 [0x00ff,0x180f,0x1801,0x1800,0xffe0,0xfff0].forEach(x=>OPTIONAL_SERVICES.push(U(x.toString(16).padStart(4,"0"))));
 
