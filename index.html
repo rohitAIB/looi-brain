@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>LOOI Brain — BLE PoC</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --acc:#3fb950; --warn:#d29922; --err:#f85149; --panel:#161b22; --line:#30363d; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font:15px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); padding:14px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:12px; margin:0 0 12px; }
+  button { font:inherit; color:var(--fg); background:var(--panel); border:1px solid var(--line);
+           border-radius:10px; padding:14px; touch-action:none; user-select:none; }
+  button:active { background:#21262d; }
+  button.primary { background:var(--acc); color:#03130a; border-color:var(--acc); font-weight:600; }
+  button:disabled { opacity:.4; }
+  .row { display:flex; gap:8px; margin-bottom:8px; }
+  .row > * { flex:1; }
+  .stat { display:flex; justify-content:space-between; background:var(--panel); border:1px solid var(--line);
+          border-radius:10px; padding:10px 12px; margin-bottom:8px; font-size:13px; }
+  .stat b { color:var(--acc); }
+  .pad { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin:10px 0; }
+  .pad .fill { visibility:hidden; }
+  .pad button { height:64px; font-size:22px; }
+  label { font-size:12px; color:var(--dim); display:block; margin:10px 0 4px; }
+  input[type=range] { width:100%; }
+  #log { background:#010409; border:1px solid var(--line); border-radius:10px; padding:10px;
+         font:11px/1.45 ui-monospace,monospace; height:200px; overflow-y:auto; white-space:pre-wrap;
+         margin-top:12px; color:var(--dim); }
+  #log .ok{color:var(--acc)} #log .warn{color:var(--warn)} #log .err{color:var(--err)} #log .tx{color:#79c0ff}
+  .hint { font-size:11px; color:var(--dim); margin:2px 0 0; }
+</style>
+</head>
+<body>
+  <h1>LOOI Brain — BLE proof-of-concept</h1>
+  <p class="sub">Chrome on Android · validates protocol + watchdog on <em>your</em> unit. Turn the robot on, then Connect.</p>
+
+  <div class="row">
+    <button id="connect" class="primary">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+  </div>
+  <div class="row">
+    <button id="dump" disabled>Dump GATT table</button>
+    <button id="handshake" disabled>Handshake + keepalive</button>
+  </div>
+
+  <div class="stat"><span>Status</span><b id="status">idle</b></div>
+  <div class="stat"><span>Battery (FED8)</span><b id="battery">—</b></div>
+  <div class="stat"><span>Heartbeat</span><b id="hb">off</b></div>
+
+  <label>Drive — press &amp; hold (releases to stop)</label>
+  <div class="pad">
+    <div class="fill"></div>
+    <button data-drive="90,0">▲</button>
+    <div class="fill"></div>
+    <button data-drive="0,-90">◀</button>
+    <button data-drive="0,0">■</button>
+    <button data-drive="0,90">▶</button>
+    <div class="fill"></div>
+    <button data-drive="-90,0">▼</button>
+    <div class="fill"></div>
+  </div>
+
+  <label>Head tilt (FED1) — experimental: <span id="headval">128</span></label>
+  <input type="range" id="head" min="0" max="255" value="128" disabled />
+  <p class="hint">Head byte format is unconfirmed — watch what actually moves and note the useful range.</p>
+
+  <div id="log"></div>
+
+<script>
+"use strict";
+
+// ---- Protocol constants (andrey-tut FEDx model; validate against this unit) ----
+const U = s => `0000${s}-0000-1000-8000-00805f9b34fb`;      // 16-bit -> full UUID
+const CHAR = {
+  MOVE: U("fed0"),   // write  [speed, turn]  signed int8
+  HEAD: U("fed1"),   // write  [angle]
+  SENS: U("fed5"),   // notify sensors
+  BATT: U("fed8"),   // read   battery / keepalive
+  TELE: U("fed9"),   // notify telemetry
+  HAND: U("feda"),   // write  handshake (0x01 then 0x03)
+};
+// Cast a wide net so Chrome will let us enumerate whatever service holds these chars.
+const OPTIONAL_SERVICES = [];
+for (let b = 0xfe00; b <= 0xffff; b += 0x10) OPTIONAL_SERVICES.push(U(b.toString(16).padStart(4,"0")));
+[0x180f,0x1801,0x1800,0xffe0,0xfff0].forEach(x=>OPTIONAL_SERVICES.push(U(x.toString(16).padStart(4,"0"))));
+
+// ---- State ----
+let device=null, server=null, chars={}, drive={s:0,t:0};
+let moveTimer=null, battTimer=null;
+
+// ---- Logging (on-screen: phone has no visible console) ----
+const logEl = document.getElementById("log");
+function log(msg, cls="") {
+  const t = new Date().toLocaleTimeString();
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = `${t}  ${msg}`;
+  logEl.appendChild(line); logEl.scrollTop = logEl.scrollHeight;
+}
+const $ = id => document.getElementById(id);
+function setStatus(s){ $("status").textContent = s; }
+
+// ---- Connect ----
+$("connect").onclick = async () => {
+  if (!navigator.bluetooth) { log("navigator.bluetooth missing — need Chrome on Android over HTTPS", "err"); return; }
+  try {
+    log("requesting device… pick your LOOI in the chooser");
+    device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,          // we don't know the advertised name/service yet
+      optionalServices: OPTIONAL_SERVICES
+    });
+    log(`selected: ${device.name || "(no name)"} [${device.id}]`, "ok");
+    device.addEventListener("gattserverdisconnected", onDisconnect);
+    setStatus("connecting…");
+    server = await device.gatt.connect();
+    log("GATT connected", "ok");
+    setStatus("connected");
+    $("connect").disabled = true; $("disconnect").disabled = false;
+    $("dump").disabled = false; $("handshake").disabled = false;
+    await mapCharacteristics();
+  } catch (e) { log("connect failed: " + e.message, "err"); setStatus("error"); }
+};
+
+// Walk every allowed service, index characteristics we care about by UUID.
+async function mapCharacteristics() {
+  chars = {};
+  const services = await server.getPrimaryServices();
+  log(`discovered ${services.length} service(s)`);
+  const wanted = new Set(Object.values(CHAR));
+  for (const svc of services) {
+    let cs = [];
+    try { cs = await svc.getCharacteristics(); } catch { continue; }
+    for (const c of cs) {
+      if (wanted.has(c.uuid)) {
+        chars[c.uuid] = c;
+        log(`  mapped ${c.uuid.slice(4,8)}  (service ${svc.uuid.slice(4,8)})`, "ok");
+      }
+    }
+  }
+  const found = Object.keys(chars).map(u=>u.slice(4,8));
+  if (found.length) log(`characteristics available: ${found.join(", ")}`, "ok");
+  else log("none of FED0/FED1/FED8/FEDA found in allowed services — parent service is likely a 128-bit vendor UUID. Run an nRF Connect scan to grab it, and I'll add it to the allow-list.", "warn");
+}
+
+// ---- Full GATT dump (what does THIS firmware actually expose?) ----
+$("dump").onclick = async () => {
+  try {
+    const services = await server.getPrimaryServices();
+    log(`=== GATT TABLE (${services.length} services) ===`);
+    for (const svc of services) {
+      log(`service ${svc.uuid}`);
+      let cs=[]; try { cs = await svc.getCharacteristics(); } catch { log("  (characteristics blocked)","warn"); continue; }
+      for (const c of cs) {
+        const p = c.properties;
+        const flags = [p.read&&"R",p.write&&"W",p.writeWithoutResponse&&"Wx",p.notify&&"N",p.indicate&&"I"].filter(Boolean).join("/");
+        log(`  char ${c.uuid}  [${flags}]`);
+      }
+    }
+    log("=== end ===");
+  } catch (e) { log("dump failed: " + e.message, "err"); }
+};
+
+// ---- Handshake + keepalive (the make-or-break watchdog defeat) ----
+$("handshake").onclick = async () => {
+  try {
+    if (!chars[CHAR.HAND]) { log("no FEDA handshake char mapped — dump the table first", "err"); return; }
+    log("handshake 1: write 0x01 -> FEDA", "tx");
+    await chars[CHAR.HAND].writeValue(Uint8Array.of(0x01));
+
+    for (const key of ["SENS","TELE"]) {
+      const c = chars[CHAR[key]];
+      if (c && c.properties.notify) {
+        await c.startNotifications();
+        c.addEventListener("characteristicvaluechanged", e => {
+          const b = [...new Uint8Array(e.target.value.buffer)].map(x=>x.toString(16).padStart(2,"0")).join(" ");
+          log(`  ${key} notify: ${b}`);
+        });
+        log(`subscribed ${key} (${CHAR[key].slice(4,8)})`, "ok");
+      }
+    }
+    log("handshake 2: write 0x03 -> FEDA", "tx");
+    await chars[CHAR.HAND].writeValue(Uint8Array.of(0x03));
+    log("handshake complete — starting keepalives", "ok");
+    startKeepalive();
+    $("head").disabled = false;
+  } catch (e) { log("handshake failed: " + e.message, "err"); }
+};
+
+// 30ms movement heartbeat + ~4s battery read. Both required or the base drops us.
+function startKeepalive() {
+  stopKeepalive();
+  const move = chars[CHAR.MOVE];
+  if (move) {
+    moveTimer = setInterval(() => {
+      const pkt = Uint8Array.of(drive.s & 0xff, drive.t & 0xff);   // two's-complement bytes
+      (move.writeValueWithoutResponse ? move.writeValueWithoutResponse(pkt) : move.writeValue(pkt)).catch(()=>{});
+    }, 30);
+    $("hb").textContent = "30ms move + 4s batt";
+  }
+  const batt = chars[CHAR.BATT];
+  if (batt) {
+    const readBatt = async () => {
+      try { const v = await batt.readValue(); $("battery").textContent = v.getUint8(0) + " (raw byte0)"; }
+      catch(e){ log("battery read failed: " + e.message, "warn"); }
+    };
+    readBatt();
+    battTimer = setInterval(readBatt, 4000);
+  }
+}
+function stopKeepalive(){ clearInterval(moveTimer); clearInterval(battTimer); moveTimer=battTimer=null; $("hb").textContent="off"; }
+
+// ---- Drive pad (press & hold) ----
+document.querySelectorAll("[data-drive]").forEach(btn => {
+  const [s,t] = btn.dataset.drive.split(",").map(Number);
+  const set = (a,b) => { drive.s=a; drive.t=b; };
+  const press = e => { e.preventDefault(); set(s,t); };
+  const rel   = e => { e.preventDefault(); set(0,0); };
+  btn.addEventListener("touchstart", press, {passive:false});
+  btn.addEventListener("touchend",   rel,   {passive:false});
+  btn.addEventListener("mousedown",  press);
+  btn.addEventListener("mouseup",    rel);
+  btn.addEventListener("mouseleave", rel);
+});
+
+// ---- Head tilt ----
+$("head").addEventListener("input", async e => {
+  const v = Number(e.target.value); $("headval").textContent = v;
+  const c = chars[CHAR.HEAD];
+  if (c) { try { await c.writeValue(Uint8Array.of(v)); } catch(err){ log("head write failed: "+err.message,"warn"); } }
+});
+
+// ---- Disconnect / cleanup ----
+$("disconnect").onclick = () => { if (device && device.gatt.connected) device.gatt.disconnect(); };
+function onDisconnect() {
+  stopKeepalive();
+  setStatus("disconnected"); log("device disconnected", "warn");
+  $("connect").disabled=false; $("disconnect").disabled=true;
+  $("dump").disabled=true; $("handshake").disabled=true; $("head").disabled=true;
+  $("battery").textContent="—";
+}
+
+log("ready. Chrome/Android + HTTPS required for Web Bluetooth.");
+</script>
+</body>
+</html>
