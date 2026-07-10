@@ -121,14 +121,18 @@ export class Looi extends EventTarget {
       write(Uint8Array.of(this._drive.s & 0xff, this._drive.t & 0xff)).then(() => this._hb.ok++).catch(() => this._hb.err++);
     }, HEARTBEAT_MS);
 
-    // FED8 battery read every 4s IS part of the keepalive — the base disconnects if it stops seeing it.
+    // FED8 battery read is part of the keepalive — and the base wants it EARLY. The stock app reads
+    // it immediately on connect; if the first read is missing the base drops us at ~3s. So read
+    // immediately, then every 3s.
     if (batt && batt.properties.read) {
-      this._battTimer = setInterval(async () => {
+      const readBatt = async () => {
         this._reading = true;
         try { const v = await batt.readValue(); this._hb.batt = v.getUint8(0); this.dispatchEvent(new CustomEvent('battery', { detail: { value: v.getUint8(0) } })); }
         catch { this._hb.batt = 'err'; }
         this._reading = false;
-      }, 4000);
+      };
+      readBatt();                                                       // immediate — beats the ~3s watchdog
+      this._battTimer = setInterval(readBatt, 3000);
     }
 
     this._hbReport = setInterval(() => {                                 // 1/s cadence report → telemetry
