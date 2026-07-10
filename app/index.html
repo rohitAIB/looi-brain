@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>LOOI Brain — P1 motion library</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --dim:#8b949e; --acc:#3fb950; --warn:#d29922; --err:#f85149; --panel:#161b22; --line:#30363d; --blue:#388bfd; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font:15px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); padding:14px; }
+  h1 { font-size:17px; margin:0 0 2px; }
+  .sub { color:var(--dim); font-size:12px; margin:0 0 12px; }
+  button { font:inherit; color:var(--fg); background:var(--panel); border:1px solid var(--line);
+           border-radius:10px; padding:13px; touch-action:none; user-select:none; }
+  button:active { background:#21262d; }
+  button.primary { background:var(--acc); color:#03130a; border-color:var(--acc); font-weight:600; }
+  button:disabled { opacity:.4; }
+  .row { display:flex; gap:8px; margin-bottom:8px; }
+  .row > * { flex:1; }
+  .stat { display:flex; justify-content:space-between; background:var(--panel); border:1px solid var(--line);
+          border-radius:10px; padding:9px 12px; margin-bottom:8px; font-size:13px; }
+  .stat b { color:var(--acc); }
+  label { font-size:12px; color:var(--dim); display:block; margin:12px 0 6px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .grid.g4 { grid-template-columns:repeat(4,1fr); }
+  .grid button { background:#12233b; border-color:#1f3a5f; }
+  .pad { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .pad .fill { visibility:hidden; }
+  .pad button { height:56px; font-size:20px; }
+  input[type=range] { width:100%; }
+  #log { background:#010409; border:1px solid var(--line); border-radius:10px; padding:10px;
+         font:11px/1.45 ui-monospace,monospace; height:150px; overflow-y:auto; white-space:pre-wrap;
+         margin-top:14px; color:var(--dim); }
+  #log .ok{color:var(--acc)} #log .warn{color:var(--warn)} #log .err{color:var(--err)} #log .tx{color:#79c0ff}
+</style>
+</head>
+<body>
+  <h1>LOOI Brain — P1 motion library</h1>
+  <p class="sub">Validates the gesture vocabulary on the real base. Robot on → Connect (auto-handshakes).</p>
+
+  <div class="row">
+    <button id="connect" class="primary">Connect</button>
+    <button id="stop">■ STOP</button>
+    <button id="disconnect" disabled>Disconnect</button>
+  </div>
+
+  <div class="stat"><span>Status</span><b id="status">idle</b></div>
+  <div class="stat"><span>Battery</span><b id="battery">—</b></div>
+  <div class="stat"><span>Telemetry (fed9)</span><b id="tele">—</b></div>
+
+  <label>Gestures</label>
+  <div class="grid" id="gestures">
+    <button data-g="nod">nod (yes)</button>
+    <button data-g="shake">shake (no)</button>
+    <button data-g="wiggle">wiggle</button>
+    <button data-g="spin:1">spin ↻</button>
+    <button data-g="spin:-1">spin ↺</button>
+    <button data-g="lookAround">look around</button>
+    <button data-g="approach">approach</button>
+    <button data-g="recoil">recoil</button>
+    <button data-g="forward">forward</button>
+  </div>
+
+  <label>Manual drive — press & hold</label>
+  <div class="pad">
+    <div class="fill"></div>
+    <button data-drive="95,0">▲</button>
+    <div class="fill"></div>
+    <button data-drive="0,-95">◀</button>
+    <button data-drive="0,0">■</button>
+    <button data-drive="0,95">▶</button>
+    <div class="fill"></div>
+    <button data-drive="-95,0">▼</button>
+    <div class="fill"></div>
+  </div>
+
+  <label>Head tilt — <span id="headval">128</span> <span style="text-transform:none;font-weight:400">(experimental)</span></label>
+  <input type="range" id="head" min="0" max="255" value="128" disabled />
+
+  <div id="log"></div>
+
+<script type="module">
+import { Looi } from './looi.js';
+
+const $ = id => document.getElementById(id);
+const looi = new Looi();
+
+function log(msg, cls = '') {
+  const el = document.createElement('div');
+  if (cls) el.className = cls;
+  el.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+  $('log').appendChild(el); $('log').scrollTop = $('log').scrollHeight;
+}
+looi.addEventListener('log', e => log(e.detail.msg, e.detail.cls));
+looi.addEventListener('battery', e => $('battery').textContent = e.detail.value + ' (raw byte0)');
+looi.addEventListener('telemetry', e => { if (e.detail.key === 'TELE') $('tele').textContent = e.detail.bytes.map(b => b.toString(16).padStart(2,'0')).join(' '); });
+
+function setConnected(on) {
+  $('status').textContent = on ? 'connected' : 'disconnected';
+  $('status').style.color = on ? 'var(--acc)' : 'var(--err)';
+  $('connect').disabled = on; $('disconnect').disabled = !on; $('head').disabled = !on;
+  document.querySelectorAll('#gestures button').forEach(b => b.disabled = !on);
+}
+looi.addEventListener('connected', () => setConnected(true));
+looi.addEventListener('disconnected', () => setConnected(false));
+
+$('connect').onclick = async () => {
+  $('status').textContent = 'connecting…';
+  try { await looi.connect(); } catch (e) { log('connect failed: ' + e.message, 'err'); $('status').textContent = 'error'; }
+};
+$('disconnect').onclick = () => looi.disconnect();
+$('stop').onclick = () => { looi.stop(); log('STOP', 'tx'); };
+
+// Gestures
+document.querySelectorAll('#gestures button').forEach(btn => {
+  btn.onclick = () => {
+    const [name, arg] = btn.dataset.g.split(':');
+    log('▶ ' + btn.textContent.trim(), 'tx');
+    try { name === 'spin' ? looi.spin(Number(arg)) : looi[name](); }
+    catch (e) { log(name + ': ' + e.message, 'err'); }
+  };
+});
+
+// Manual drive pad (press & hold)
+document.querySelectorAll('[data-drive]').forEach(btn => {
+  const [s, t] = btn.dataset.drive.split(',').map(Number);
+  const press = e => { e.preventDefault(); if (looi.connected) looi.drive(s, t); };
+  const rel   = e => { e.preventDefault(); if (looi.connected) looi.drive(0, 0); };
+  btn.addEventListener('touchstart', press, { passive: false });
+  btn.addEventListener('touchend', rel, { passive: false });
+  btn.addEventListener('mousedown', press);
+  btn.addEventListener('mouseup', rel);
+  btn.addEventListener('mouseleave', rel);
+});
+
+// Head slider
+$('head').addEventListener('input', e => { $('headval').textContent = e.target.value; if (looi.connected) looi.head(Number(e.target.value)); });
+
+log('P1 motion test ready. Chrome/Android + HTTPS. Tap Connect.');
+</script>
+</body>
+</html>
