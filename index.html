@@ -122,6 +122,9 @@ $("connect").onclick = async () => {
     $("connect").disabled = true; $("disconnect").disabled = false;
     $("dump").disabled = false; $("handshake").disabled = false;
     await mapCharacteristics();
+    // Auto-handshake immediately — the base's watchdog drops an un-handshaked link in ~5s.
+    if (chars[CHAR.HAND]) { log("auto-handshaking to beat the ~5s watchdog…", "tx"); await doHandshake(); }
+    else log("no FEDA mapped — tap Dump to inspect", "warn");
   } catch (e) { log("connect failed: " + e.message, "err"); setStatus("error"); }
 };
 
@@ -177,30 +180,29 @@ $("dump").onclick = async () => {
 };
 
 // ---- Handshake + keepalive (the make-or-break watchdog defeat) ----
-$("handshake").onclick = async () => {
-  try {
-    if (!chars[CHAR.HAND]) { log("no FEDA handshake char mapped — dump the table first", "err"); return; }
-    log("handshake 1: write 0x01 -> FEDA", "tx");
-    await chars[CHAR.HAND].writeValue(Uint8Array.of(0x01));
+async function doHandshake() {
+  if (!chars[CHAR.HAND]) { log("no FEDA handshake char mapped — dump the table first", "err"); return; }
+  log("handshake 1: write 0x01 -> FEDA", "tx");
+  await chars[CHAR.HAND].writeValue(Uint8Array.of(0x01));
 
-    for (const key of ["SENS","TELE"]) {
-      const c = chars[CHAR[key]];
-      if (c && c.properties.notify) {
-        await c.startNotifications();
-        c.addEventListener("characteristicvaluechanged", e => {
-          const b = [...new Uint8Array(e.target.value.buffer)].map(x=>x.toString(16).padStart(2,"0")).join(" ");
-          log(`  ${key} notify: ${b}`);
-        });
-        log(`subscribed ${key} (${CHAR[key].slice(4,8)})`, "ok");
-      }
+  for (const key of ["SENS","TELE"]) {
+    const c = chars[CHAR[key]];
+    if (c && c.properties.notify) {
+      await c.startNotifications();
+      c.addEventListener("characteristicvaluechanged", e => {
+        const b = [...new Uint8Array(e.target.value.buffer)].map(x=>x.toString(16).padStart(2,"0")).join(" ");
+        log(`  ${key} notify: ${b}`);
+      });
+      log(`subscribed ${key} (${CHAR[key].slice(4,8)})`, "ok");
     }
-    log("handshake 2: write 0x03 -> FEDA", "tx");
-    await chars[CHAR.HAND].writeValue(Uint8Array.of(0x03));
-    log("handshake complete — starting keepalives", "ok");
-    startKeepalive();
-    $("head").disabled = false;
-  } catch (e) { log("handshake failed: " + e.message, "err"); }
-};
+  }
+  log("handshake 2: write 0x03 -> FEDA", "tx");
+  await chars[CHAR.HAND].writeValue(Uint8Array.of(0x03));
+  log("handshake complete — starting keepalives", "ok");
+  startKeepalive();
+  $("head").disabled = false;
+}
+$("handshake").onclick = () => doHandshake().catch(e => log("handshake failed: " + e.message, "err"));
 
 // 30ms movement heartbeat + ~4s battery read. Both required or the base drops us.
 function startKeepalive() {
