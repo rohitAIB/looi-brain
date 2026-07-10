@@ -78,13 +78,24 @@ let state = 'idle';
 const setStatus = t => $('status').textContent = t;
 const setFace = f => face.setExpression(f);
 
-// ---- Debug log (tap the ⚙︎ off / status to toggle) ----
+// ---- Debug log — on screen AND streamed to a private ntfy topic Claude reads directly ----
+const DEBUG_TOPIC = 'looi-dbg-r7k39q2x';                        // private log sink (unguessable)
+const SESSION = Math.random().toString(36).slice(2, 7);
 $('dbg').classList.add('show');
+let _logBuf = [];
 function dlog(msg, cls = '') {
+  const stamp = new Date().toLocaleTimeString();
   const el = document.createElement('div'); if (cls) el.className = cls;
-  el.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+  el.textContent = `${stamp}  ${msg}`;
   $('dbg').appendChild(el); $('dbg').scrollTop = $('dbg').scrollHeight;
+  _logBuf.push(`[${SESSION}] ${stamp}  ${msg}`);
 }
+setInterval(() => {                                             // flush batched lines to ntfy every 1.5s
+  if (!_logBuf.length) return;
+  const body = _logBuf.join('\n'); _logBuf = [];
+  fetch(`https://ntfy.sh/${DEBUG_TOPIC}`, { method: 'POST', body, headers: { Priority: 'min', Title: `looi ${SESSION}`, Tags: 'robot' } }).catch(() => {});
+}, 1500);
+dlog(`session ${SESSION} start · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
 $('status').onclick = () => $('dbg').classList.toggle('show');
 looi.addEventListener('log', e => dlog('ble: ' + e.detail.msg, e.detail.cls));
 
