@@ -215,14 +215,19 @@ function startKeepalive() {
     }, 30);
     $("hb").textContent = "30ms move + 4s batt";
   }
+  // Battery via NOTIFY (not polling) — a concurrent read collides with the 30ms move-write loop
+  // ("GATT operation failed"). FED8 supports notify, so subscribe instead; no collision, no keepalive
+  // needed (the move heartbeat alone holds the link).
   const batt = chars[CHAR.BATT];
-  if (batt) {
-    const readBatt = async () => {
-      try { const v = await batt.readValue(); $("battery").textContent = v.getUint8(0) + " (raw byte0)"; }
-      catch(e){ log("battery read failed: " + e.message, "warn"); }
-    };
-    readBatt();
-    battTimer = setInterval(readBatt, 4000);
+  if (batt && batt.properties.notify) {
+    batt.startNotifications().then(() => {
+      batt.addEventListener("characteristicvaluechanged", e => {
+        $("battery").textContent = e.target.value.getUint8(0) + " (raw byte0)";
+      });
+      log("subscribed battery notify (fed8)", "ok");
+    }).catch(e => log("battery notify failed: " + e.message, "warn"));
+  } else if (batt) {
+    batt.readValue().then(v => $("battery").textContent = v.getUint8(0) + " (raw byte0)").catch(()=>{});
   }
 }
 function stopKeepalive(){ clearInterval(moveTimer); clearInterval(battTimer); moveTimer=battTimer=null; $("hb").textContent="off"; }
