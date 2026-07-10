@@ -65,9 +65,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=9';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=9';
-import { Voice } from './voice.js?v=9';
+import { Looi }  from './looi.js?v=10';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=10';
+import { Voice } from './voice.js?v=10';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -141,23 +141,58 @@ $('talk').addEventListener('touchend', endTalk, { passive:false });
 $('talk').addEventListener('mousedown', startTalk);
 $('talk').addEventListener('mouseup', endTalk);
 
+// ---- Fuzzy intent engine (generous keyword lists + Levenshtein → tolerant of bad STT) ----
+const INTENTS = [
+  // multi-word / specific first
+  { keys: ['come here','come over','over here','come to me','come on'], run: () => looi.approach(), say: 'On my way.' },
+  { keys: ['back up','back off','move back','go back','backward','backwards','reverse'], run: () => looi.recoil(), say: 'Backing up.' },
+  { keys: ['look around','look round','scan the room','have a look','where am i'], run: () => looi.lookAround(), say: 'Looking around.' },
+  { keys: ['turn around','spin','spinning','spun','twirl','rotate'], run: () => looi.spin(1), say: 'Spinning!', expr: 'happy' },
+  { keys: ['move forward','go forward','go straight','forward','ahead'], run: () => looi.forward(), say: 'Going forward.' },
+  { keys: ['dance','dancing','wiggle','wiggly','boogie','party'], run: () => looi.wiggle(6), say: 'Dancing!', expr: 'happy' },
+  { keys: ['nod','yes','yeah','yep','agreed','agree','correct'], run: () => looi.nod(), say: 'Yes.', expr: 'happy' },
+  { keys: ['shake','no','nope','nah','disagree','wrong'], run: () => looi.shake(), say: 'No.' },
+  { keys: ['stop','freeze','halt','wait','stay','stand still'], run: () => looi.stop(), say: 'Stopped.', body: false },
+  { keys: ['hello','hi','hey','yo','good morning','good evening','hiya'], run: null, say: 'Hey! I can move — try telling me to spin or come here.', expr: 'happy' },
+  { keys: ['come here boy','look at me','follow me','wake up'], run: null, say: "I'm right here.", expr: 'happy' },
+];
+
+function norm(s) { return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim(); }
+function lev(a, b) {
+  const m = a.length, n = b.length, d = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+  for (let j = 0; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++)
+    d[i][j] = Math.min(d[i-1][j] + 1, d[i][j-1] + 1, d[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+  return d[m][n];
+}
+function tokenNear(tok, key) {                                   // fuzzy single-word match
+  if (key.length <= 2) return tok === key;                      // tiny words (no, hi, yo) exact only
+  if (tok === key || tok.startsWith(key) || key.startsWith(tok)) return true;
+  return lev(tok, key) <= (key.length <= 4 ? 1 : 2);            // tolerate 1–2 char STT errors
+}
+function matchIntent(text) {
+  const t = norm(text), toks = t.split(' ');
+  for (const intent of INTENTS) {
+    for (const key of intent.keys) {
+      const hit = key.includes(' ') ? t.includes(key) : toks.some(tok => tokenNear(tok, key));
+      if (hit) return intent;
+    }
+  }
+  return null;
+}
+
 // ---- The "brain": intent → action + speech ----
 async function handle(text) {
   state = 'thinking'; setFace('thinking'); setStatus('thinking…');
   dlog(`cmd: "${text}"  | robot=${looi.connected ? 'CONNECTED' : 'disconnected'}`, looi.connected ? 'ok' : 'warn');
-  const t = text.toLowerCase();
-  const act = (gesture, say, expr = 'speaking') => reply(say, expr, gesture);
-
-  if (/\b(spin|turn around|twirl)\b/.test(t))         return act(() => looi.spin(1), 'Spinning!');
-  if (/\b(come here|come|approach|over here)\b/.test(t)) return act(() => looi.approach(), 'On my way.');
-  if (/\b(back up|back off|move back|reverse)\b/.test(t)) return act(() => looi.recoil(), 'Backing up.');
-  if (/\b(forward|go straight|move forward)\b/.test(t)) return act(() => looi.forward(), 'Going forward.');
-  if (/\b(nod|yes)\b/.test(t))                         return act(() => looi.nod(), 'Yes.', 'happy');
-  if (/\b(shake|no)\b/.test(t))                        return act(() => looi.shake(), 'No.');
-  if (/\b(look around|scan|where am i)\b/.test(t))     return act(() => looi.lookAround(), 'Looking around.');
-  if (/\b(dance|wiggle|party)\b/.test(t))              return act(() => looi.wiggle(6), 'Dancing!', 'happy');
-  if (/\b(hi|hello|hey|good morning)\b/.test(t))       return reply('Hey! I can move — try telling me to spin or come here.', 'happy');
-  if (/\b(stop|freeze|halt)\b/.test(t))               { looi.stop(); return reply('Stopped.'); }
+  const intent = matchIntent(text);
+  if (intent) {
+    const needsBody = !!intent.run && intent.body !== false;
+    let say = intent.say;
+    if (intent.run && looi.connected) { try { intent.run(); } catch {} }
+    else if (needsBody && !looi.connected) say = 'Connect my body first, then I can do that.';
+    return reply(say, intent.expr || 'speaking', null);   // gesture already fired above
+  }
 
   // General chat → optional LLM proxy, else honest fallback.
   const ep = localStorage.getItem('brainEndpoint');
