@@ -81,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=30';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=30';
-import { Voice } from './voice.js?v=30';
+import { Looi }  from './looi.js?v=31';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=31';
+import { Voice } from './voice.js?v=31';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -116,7 +116,7 @@ setInterval(() => {                                             // flush batched
   const body = _logBuf.join('\n'); _logBuf = [];
   fetch(`https://ntfy.sh/${DEBUG_TOPIC}`, { method: 'POST', body, headers: { Priority: 'min', Title: `looi ${SESSION}`, Tags: 'robot' } }).catch(() => {});
 }, 1500);
-dlog(`session ${SESSION} start · app v30 · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
+dlog(`session ${SESSION} start · app v31 · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
 $('status').onclick = () => $('dbg').classList.toggle('show');
 looi.addEventListener('log', e => dlog('ble: ' + e.detail.msg, e.detail.cls));
 
@@ -272,7 +272,10 @@ async function wanderVision(maxMs = 120000) {
   wanderActive = true;
   dlog('wander(vision): start', 'tx');
   const t0 = performance.now();
+  const zzz = ms => new Promise(r => setTimeout(r, ms));
+  let turnDir = null, blockedRun = 0;                            // commit to ONE escape direction; count being boxed in
   try {
+    looi.head(105);                                              // tilt down a bit — frame the floor path, not the ceiling
     while (wanderActive && looi.connected && performance.now() - t0 < maxMs) {
       let v = null;
       try {
@@ -282,12 +285,20 @@ async function wanderVision(maxMs = 120000) {
       } catch (e) { dlog('see: ' + e.message, 'warn'); }
       if (!wanderActive || !looi.connected) break;
       if (v) dlog(`see: ${v.clear ? 'CLEAR' : 'blocked → ' + v.turn} — ${(v.why || '').slice(0, 48)}`, v.clear ? 'ok' : 'warn');
-      if (!v) { looi.drive(60, 0); await new Promise(r => setTimeout(r, 900)); }          // vision down → cautious burst
-      else if (v.clear) { looi.drive(95, 0); await new Promise(r => setTimeout(r, 1300)); } // open floor → go
-      else { looi.drive(0, v.turn === 'left' ? -100 : 100); await new Promise(r => setTimeout(r, 480 + Math.random() * 250)); } // turn to the open side
+      if (!v) { looi.drive(60, 0); await zzz(900); }             // vision down → cautious burst
+      else if (v.clear) { turnDir = null; blockedRun = 0; looi.drive(95, 0); await zzz(1300); }   // open floor → go
+      else if (++blockedRun >= 5) {                              // boxed in → back out and flip around
+        dlog('wander: boxed in → backing out', 'warn');
+        looi.drive(-90, 0); await zzz(900);
+        looi.drive(0, 100); await zzz(1200);
+        blockedRun = 0; turnDir = null;
+      } else {                                                   // keep rotating the SAME way until a clear view
+        if (!turnDir) turnDir = v.turn === 'left' ? -1 : 1;
+        looi.drive(0, turnDir * 100); await zzz(700);
+      }
       looi.drive(0, 0);
     }
-  } finally { wanderActive = false; looi.drive(0, 0); releaseCamera(); dlog('wander(vision): end', 'tx'); }
+  } finally { wanderActive = false; looi.drive(0, 0); looi.head(128); releaseCamera(); dlog('wander(vision): end', 'tx'); }
 }
 function stopWander() { wanderActive = false; }
 async function startWander() {
