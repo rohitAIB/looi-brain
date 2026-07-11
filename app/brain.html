@@ -48,7 +48,10 @@
   <div id="transcript"></div>
 
   <div class="bar bottom">
-    <button id="talk">Hold to<br>talk</button>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button id="wake">🎙 Hey LOOI: off</button>
+      <button id="talk">Hold to<br>talk</button>
+    </div>
     <span class="chip" id="hint">tap the robot button to give me a body</span>
   </div>
 
@@ -65,9 +68,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=10';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=10';
-import { Voice } from './voice.js?v=10';
+import { Looi }  from './looi.js?v=11';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=11';
+import { Voice } from './voice.js?v=11';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -126,14 +129,48 @@ $('connect').onclick = async () => {
   setStatus('idle');
 };
 
+// ---- Screen Wake Lock (keeps the screen alive — no native app needed) ----
+let wakeLock = null;
+async function keepScreenOn() {
+  if (!('wakeLock' in navigator)) { dlog('wakeLock unsupported', 'warn'); return; }
+  try { wakeLock = await navigator.wakeLock.request('screen'); dlog('screen wake lock ON', 'ok');
+        wakeLock.addEventListener('release', () => { wakeLock = null; }); }
+  catch (e) { dlog('wake lock failed: ' + e.message, 'warn'); }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !wakeLock) keepScreenOn(); });
+
 // ---- Voice loop ----
+let handsFree = false, awaitingCmd = false, awaitTimer = null;
+const WAKE = ['looi', 'louie', 'louis', 'lewis', 'loui', 'lui', 'luis', 'gooey', 'lewie'];  // STT mishears the name
+function findWake(toks) { return toks.findIndex(tok => WAKE.some(w => tokenNear(tok, w))); }
+
 voice.addEventListener('partial', e => $('transcript').textContent = e.detail.text);
-voice.addEventListener('final',   e => { $('transcript').textContent = e.detail.text; handle(e.detail.text); });
+voice.addEventListener('final', e => {
+  const raw = e.detail.text; $('transcript').textContent = raw;
+  if (!handsFree) { handle(raw); return; }                          // push-to-talk path
+  const toks = norm(raw).split(' ');
+  if (awaitingCmd) { clearTimeout(awaitTimer); awaitingCmd = false; handle(raw); return; }
+  const wi = findWake(toks);
+  if (wi < 0) return;                                               // no wake word → ignore ambient speech
+  dlog(`wake heard in "${raw}"`, 'ok');
+  const after = toks.slice(wi + 1).join(' ').trim();
+  if (after) handle(after);                                         // "hey looi, spin" → run "spin"
+  else { setFace('listening'); voice.speak('Yes?'); awaitingCmd = true; awaitTimer = setTimeout(() => { awaitingCmd = false; setFace('idle'); }, 6000); }
+});
 voice.addEventListener('listen-end', () => { if (state === 'listening') { state = 'idle'; setFace('idle'); setStatus('idle'); } });
-voice.addEventListener('error', e => { setStatus('mic: ' + e.detail.msg); state = 'idle'; setFace('idle'); });
+voice.addEventListener('error', e => { if (!handsFree) { setStatus('mic: ' + e.detail.msg); state = 'idle'; setFace('idle'); } dlog('mic: ' + e.detail.msg, 'warn'); });
+
+// ---- Hey LOOI hands-free toggle ----
+$('wake').onclick = async () => {
+  handsFree = !handsFree;
+  $('wake').textContent = '🎙 Hey LOOI: ' + (handsFree ? 'ON' : 'off');
+  $('talk').style.opacity = handsFree ? '0.4' : '1';
+  if (handsFree) { await keepScreenOn(); voice.listenContinuous(); dlog('hands-free ON — always listening', 'tx'); setStatus('say “Hey LOOI…”'); }
+  else { voice.stopContinuous(); awaitingCmd = false; dlog('hands-free OFF', 'warn'); setStatus('idle'); }
+};
 
 // Push-to-talk
-const startTalk = e => { e.preventDefault(); if (state !== 'idle') return; if (!voice.sttSupported) { setStatus('speech recognition unavailable'); return; }
+const startTalk = e => { e.preventDefault(); if (handsFree) return; if (state !== 'idle') return; if (!voice.sttSupported) { setStatus('speech recognition unavailable'); return; }
   state = 'listening'; setFace('listening'); setStatus('listening…'); $('talk').classList.add('live'); $('transcript').textContent = ''; voice.listen(); };
 const endTalk = e => { e.preventDefault(); $('talk').classList.remove('live'); voice.stopListening(); };
 $('talk').addEventListener('touchstart', startTalk, { passive:false });

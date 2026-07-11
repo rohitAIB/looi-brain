@@ -1,7 +1,8 @@
 // voice.js — browser-native speech I/O for the LOOI brain (no API keys).
 // STT: Web Speech Recognition (Android Chrome). TTS: Web Speech Synthesis.
-// These are the v1 stand-ins; the keyed path (Pi Whisper + ElevenLabs "Brian") slots in later
-// behind the same interface. Events: 'partial' | 'final' | 'listen-end' | 'speak-start' | 'speak-end' | 'error'.
+// Supports one-shot (push-to-talk) AND continuous "wake word" listening.
+// v1 stand-ins; keyed path (Pi Whisper + ElevenLabs "Brian", Porcupine wake word) slots in later.
+// Events: 'partial' | 'final' | 'listen-end' | 'speak-start' | 'speak-end' | 'error'.
 
 export class Voice extends EventTarget {
   constructor() {
@@ -10,6 +11,8 @@ export class Voice extends EventTarget {
     this.sttSupported = !!SR;
     this.ttsSupported = 'speechSynthesis' in window;
     this.listening = false;
+    this._wantContinuous = false;     // keep restarting recognition (wake-word mode)
+    this._paused = false;             // temporarily muted (e.g. while speaking)
     this._voice = null;
     if (SR) {
       const r = new SR();
@@ -23,14 +26,22 @@ export class Voice extends EventTarget {
         if (interim) this.dispatchEvent(new CustomEvent('partial', { detail: { text: interim } }));
         if (final)   this.dispatchEvent(new CustomEvent('final',   { detail: { text: final.trim() } }));
       };
-      r.onend = () => { this.listening = false; this.dispatchEvent(new Event('listen-end')); };
-      r.onerror = e => { this.listening = false; this.dispatchEvent(new CustomEvent('error', { detail: { msg: e.error } })); };
+      r.onend = () => {
+        this.listening = false;
+        if (this._wantContinuous && !this._paused) { this._safeStart(); }   // keep the wake loop alive
+        else this.dispatchEvent(new Event('listen-end'));
+      };
+      r.onerror = e => {
+        this.listening = false;
+        // In wake mode, transient errors (no-speech/aborted/network) just restart quietly.
+        if (this._wantContinuous && ['no-speech', 'aborted', 'network'].includes(e.error)) return;
+        this.dispatchEvent(new CustomEvent('error', { detail: { msg: e.error } }));
+      };
       this._rec = r;
     }
     if (this.ttsSupported) {
       const pick = () => {
         const vs = speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
-        // Prefer a male-ish English voice as a Brian stand-in; fall back to any English.
         this._voice = vs.find(v => /google.*(uk|us).*male|daniel|arthur|brian/i.test(v.name))
                    || vs.find(v => /google/i.test(v.name)) || vs[0] || null;
       };
@@ -39,23 +50,39 @@ export class Voice extends EventTarget {
     }
   }
 
+  _safeStart() { try { this._rec.start(); this.listening = true; } catch (e) { /* already started */ } }
+
+  // One-shot (push-to-talk)
   listen() {
     if (!this._rec || this.listening) return;
-    try { this._rec.start(); this.listening = true; }
-    catch (e) { this.dispatchEvent(new CustomEvent('error', { detail: { msg: e.message } })); }
+    this._wantContinuous = false; this._rec.continuous = false;
+    this._safeStart();
   }
   stopListening() { if (this._rec && this.listening) this._rec.stop(); }
+
+  // Continuous wake-word listening
+  listenContinuous() {
+    if (!this._rec) return;
+    this._wantContinuous = true; this._paused = false; this._rec.continuous = true;
+    this._safeStart();
+  }
+  stopContinuous() { this._wantContinuous = false; this._rec.continuous = false; try { this._rec.stop(); } catch {} }
+  _pause()  { this._paused = true;  try { this._rec.stop(); } catch {} }
+  _resume() { this._paused = false; if (this._wantContinuous) this._safeStart(); }
 
   speak(text) {
     return new Promise(resolve => {
       if (!this.ttsSupported || !text) { resolve(); return; }
+      const wasWake = this._wantContinuous;
+      if (wasWake) this._pause();                       // mute mic so it doesn't hear itself
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       if (this._voice) u.voice = this._voice;
       u.rate = 1.02; u.pitch = 1.0;
+      const done = () => { this.dispatchEvent(new Event('speak-end')); if (wasWake) setTimeout(() => this._resume(), 250); resolve(); };
       u.onstart = () => this.dispatchEvent(new Event('speak-start'));
-      u.onend = () => { this.dispatchEvent(new Event('speak-end')); resolve(); };
-      u.onerror = () => { this.dispatchEvent(new Event('speak-end')); resolve(); };
+      u.onend = done;
+      u.onerror = done;
       speechSynthesis.speak(u);
     });
   }
