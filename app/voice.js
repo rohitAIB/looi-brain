@@ -15,35 +15,10 @@ export class Voice extends EventTarget {
     this._paused = false;             // temporarily muted (e.g. while speaking)
     this._voice = null;
     if (SR) {
-      const r = new SR();
-      r.lang = 'en-US'; r.interimResults = true; r.continuous = false; r.maxAlternatives = 5;  // extra guesses let us rescue a misheard wake word
-      r.onresult = e => {
-        let interim = '', final = '', alternatives = [], confidence = null;
-        for (let i = e.resultIndex; i < e.results.length; i++) {
-          const res = e.results[i];
-          if (res.isFinal) {
-            final += res[0].transcript;
-            confidence = res[0].confidence;                       // 0..1; Chrome sometimes reports 0 (treat as unknown)
-            alternatives = [...res].map(a => (a.transcript || '').trim()).filter(Boolean);
-          } else {
-            interim += res[0].transcript;
-          }
-        }
-        if (interim) this.dispatchEvent(new CustomEvent('partial', { detail: { text: interim } }));
-        if (final)   this.dispatchEvent(new CustomEvent('final',   { detail: { text: final.trim(), alternatives, confidence } }));
-      };
-      r.onend = () => {
-        this.listening = false;
-        if (this._wantContinuous && !this._paused) { this._safeStart(); }   // keep the wake loop alive
-        else this.dispatchEvent(new Event('listen-end'));
-      };
-      r.onerror = e => {
-        this.listening = false;
-        // In wake mode, transient errors (no-speech/aborted/network) just restart quietly.
-        if (this._wantContinuous && ['no-speech', 'aborted', 'network'].includes(e.error)) return;
-        this.dispatchEvent(new CustomEvent('error', { detail: { msg: e.error } }));
-      };
-      this._rec = r;
+      this._SR = SR;
+      this._startFails = 0;
+      this._cooldownUntil = 0;
+      this._buildRec();
       // Watchdog: the resume-after-TTS chain can break (Chrome's utterance onend sometimes never
       // fires; rec.start() can throw mid-restart) and the wake loop dies silently. Every 4s, if we
       // SHOULD be listening but aren't, revive it — "Hey LOOI stopped working" was this.
@@ -65,7 +40,59 @@ export class Voice extends EventTarget {
     }
   }
 
-  _safeStart() { try { this._rec.start(); this.listening = true; } catch (e) { /* already started */ } }
+  // (Re)create the recognizer. After Android backgrounds the tab, Chrome's recognizer can go
+  // ZOMBIE — it thinks it's still running, start() throws forever, and no restart loop can save
+  // it. The only cure is a fresh SpeechRecognition object, so all handlers live here.
+  _buildRec() {
+    const r = new this._SR();
+    r.lang = 'en-US'; r.interimResults = true; r.continuous = this._wantContinuous; r.maxAlternatives = 5;  // extra guesses let us rescue a misheard wake word
+    r.onstart = () => { this.listening = true; this._startFails = 0; };
+    r.onresult = e => {
+      let interim = '', final = '', alternatives = [], confidence = null;
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const res = e.results[i];
+        if (res.isFinal) {
+          final += res[0].transcript;
+          confidence = res[0].confidence;                       // 0..1; Chrome sometimes reports 0 (treat as unknown)
+          alternatives = [...res].map(a => (a.transcript || '').trim()).filter(Boolean);
+        } else {
+          interim += res[0].transcript;
+        }
+      }
+      if (interim) this.dispatchEvent(new CustomEvent('partial', { detail: { text: interim } }));
+      if (final)   this.dispatchEvent(new CustomEvent('final',   { detail: { text: final.trim(), alternatives, confidence } }));
+    };
+    r.onend = () => {
+      this.listening = false;
+      if (this._wantContinuous && !this._paused) { this._safeStart(); }   // keep the wake loop alive
+      else this.dispatchEvent(new Event('listen-end'));
+    };
+    r.onerror = e => {
+      this.listening = false;
+      // In wake mode, transient errors (no-speech/aborted/network) just restart quietly.
+      if (this._wantContinuous && ['no-speech', 'aborted', 'network'].includes(e.error)) return;
+      this.dispatchEvent(new CustomEvent('error', { detail: { msg: e.error } }));
+    };
+    this._rec = r;
+  }
+
+  _safeStart() {
+    if (performance.now() < this._cooldownUntil) return;          // don't tight-loop via onend→start→throw→abort→onend
+    try { this._rec.start(); this.listening = true; }
+    catch (e) {
+      this.listening = false;
+      this._cooldownUntil = performance.now() + 1200;
+      if (++this._startFails >= 3) {                              // zombie recognizer → rebuild from scratch
+        this._startFails = 0;
+        try { this._rec.onend = null; this._rec.abort(); } catch {}
+        this._buildRec();
+        this.dispatchEvent(new CustomEvent('rebuilt'));
+        try { this._rec.start(); this.listening = true; } catch {}
+      } else {
+        try { this._rec.abort(); } catch {}                       // reset; the 4s watchdog retries
+      }
+    }
+  }
 
   // One-shot (push-to-talk)
   listen() {

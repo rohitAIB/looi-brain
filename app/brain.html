@@ -81,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=24';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=24';
-import { Voice } from './voice.js?v=24';
+import { Looi }  from './looi.js?v=26';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=26';
+import { Voice } from './voice.js?v=26';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -107,14 +107,16 @@ function dlog(msg, cls = '') {
   const el = document.createElement('div'); if (cls) el.className = cls;
   el.textContent = `${stamp}  ${msg}`;
   $('dbg').appendChild(el); $('dbg').scrollTop = $('dbg').scrollHeight;
-  _logBuf.push(`[${SESSION}] ${stamp}  ${msg}`);
+  // The 1/s BLE heartbeat lines burned through ntfy's daily publish cap and killed the remote
+  // log pipe — keep them on-screen but only stream them to ntfy when they carry a warning.
+  if (!/\bhb:/.test(msg) || cls) _logBuf.push(`[${SESSION}] ${stamp}  ${msg}`);
 }
 setInterval(() => {                                             // flush batched lines to ntfy every 1.5s
   if (!_logBuf.length) return;
   const body = _logBuf.join('\n'); _logBuf = [];
   fetch(`https://ntfy.sh/${DEBUG_TOPIC}`, { method: 'POST', body, headers: { Priority: 'min', Title: `looi ${SESSION}`, Tags: 'robot' } }).catch(() => {});
 }, 1500);
-dlog(`session ${SESSION} start · app v25 · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
+dlog(`session ${SESSION} start · app v26 · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
 $('status').onclick = () => $('dbg').classList.toggle('show');
 looi.addEventListener('log', e => dlog('ble: ' + e.detail.msg, e.detail.cls));
 
@@ -223,6 +225,7 @@ voice.addEventListener('final', e => {
 });
 voice.addEventListener('listen-end', () => { if (state === 'listening') { state = 'idle'; setFace('idle'); setStatus(idleStatus()); } });
 voice.addEventListener('revived', () => dlog('wake loop revived by watchdog', 'warn'));
+voice.addEventListener('rebuilt', () => dlog('recognizer went zombie → rebuilt fresh', 'warn'));
 voice.addEventListener('error', e => { if (!handsFree) { setStatus('mic: ' + e.detail.msg); state = 'idle'; setFace('idle'); } dlog('mic: ' + e.detail.msg, 'warn'); });
 
 // ---- Hey LOOI hands-free toggle ----
