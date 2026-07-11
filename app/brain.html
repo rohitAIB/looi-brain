@@ -81,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=17';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=17';
-import { Voice } from './voice.js?v=17';
+import { Looi }  from './looi.js?v=18';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=18';
+import { Voice } from './voice.js?v=18';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -250,11 +250,25 @@ async function handle(text) {
     const act = ACTIONS[j.action];
     if (act && looi.connected) { try { act(); } catch {} }
     else if (act && !looi.connected) say = 'Connect my body first and I can do that.';
-    return reply(say || "I'm not sure how to answer that.", act ? 'happy' : 'speaking', null);
+    await reply(say || "I'm not sure how to answer that.", act ? 'happy' : 'speaking', null);
+    if (j.listen) startFollowUp();          // it asked a question → keep the mic open for the answer
   } catch (e) { dlog('brain fetch FAILED: ' + e.message, 'err'); return reply('My brain is unreachable right now.'); }
 }
 
 const idleStatus = () => handsFree ? '🎙 Listening for “Hey LOOI”' : 'idle';
+
+// Follow-up window: after LOOI asks a question, keep the mic open ~10s so you can reply
+// WITHOUT saying "Hey LOOI" again (like Google's Continued Conversation).
+function startFollowUp() {
+  setFace('listening'); setStatus('🔵 listening…'); dlog('follow-up window open', 'tx');
+  if (handsFree) {
+    awaitingCmd = true; state = 'listening';
+    clearTimeout(awaitTimer);
+    awaitTimer = setTimeout(() => { awaitingCmd = false; state = 'idle'; setFace('idle'); setStatus(idleStatus()); }, 10000);
+  } else {
+    state = 'listening'; voice.listen();     // push-to-talk: open the mic once for the reply
+  }
+}
 async function reply(say, expr = 'speaking', gesture = null) {
   state = 'speaking'; setFace(expr); setStatus('🗣 Speaking…');
   if (gesture && looi.connected) { try { gesture(); } catch {} }
