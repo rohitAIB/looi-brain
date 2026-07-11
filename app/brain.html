@@ -81,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=20';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=20';
-import { Voice } from './voice.js?v=20';
+import { Looi }  from './looi.js?v=21';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=21';
+import { Voice } from './voice.js?v=21';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -256,8 +256,37 @@ function tokenNear(tok, key) {                                   // fuzzy single
   if (tok === key || tok.startsWith(key) || key.startsWith(tok)) return true;
   return lev(tok, key) <= (key.length <= 4 ? 1 : 2);            // tolerate 1–2 char STT errors
 }
+
+// ---- Custom vocabulary: Web Speech can't be TAUGHT words, so we correct its OUTPUT ----
+// Add words the recognizer mangles. Key = the correct word/phrase you want sent to the brain;
+// value = the wrong transcriptions you actually hear (tap the status pill to see the debug log).
+// The canonical spelling + a 1-char typo are auto-handled, so list only the real misses.
+// Multi-word phrases work too, e.g.  'sofa lamp': ['sofia lamp', 'soda lamp'].
+const VOCAB = {
+  // 'ayaan':     ['iron', 'ian', 'aan'],
+  // 'tyson':     ['tightson', 'ty son'],
+  // 'sofa lamp': ['sofia lamp', 'soda lamp'],
+};
+function correctVocab(text) {
+  if (!Object.keys(VOCAB).length) return text;                  // no custom words → leave untouched
+  let out = ' ' + text.toLowerCase() + ' ';
+  for (const [canon, aliases] of Object.entries(VOCAB)) {        // exact alias / phrase → canonical
+    for (const a of [canon, ...aliases]) {
+      const esc = a.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(new RegExp('\\s' + esc + '\\s', 'g'), ' ' + canon + ' ');
+    }
+  }
+  const singles = Object.keys(VOCAB).filter(c => !c.includes(' '));  // 1-char fuzzy for single words
+  out = out.split(/\s+/).map(tok => (!tok || singles.includes(tok)) ? tok
+        : (singles.find(c => c.length > 3 && lev(tok, c) <= 1) || tok)).join(' ');
+  const fixed = out.trim();
+  if (fixed !== text.toLowerCase().trim()) dlog(`vocab: "${text}" → "${fixed}"`, 'tx');
+  return fixed;
+}
+
 // ---- The "brain": everything goes to the LLM, which decides reply + body action ----
 async function handle(text) {
+  text = correctVocab(text);                                    // snap mangled custom words first
   state = 'thinking'; setFace('thinking'); setStatus('💭 Thinking…');
   dlog(`cmd: "${text}"  | robot=${looi.connected ? 'CONNECTED' : 'disconnected'}`, looi.connected ? 'ok' : 'warn');
 
