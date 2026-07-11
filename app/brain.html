@@ -81,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=15';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=15';
-import { Voice } from './voice.js?v=15';
+import { Looi }  from './looi.js?v=16';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=16';
+import { Voice } from './voice.js?v=16';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -170,8 +170,12 @@ voice.addEventListener('final', e => {
   if (wi < 0) return;                                               // no wake word → ignore ambient speech
   dlog(`wake heard in "${raw}"`, 'ok');
   const after = toks.slice(wi + 1).join(' ').trim();
-  if (after) handle(after);                                         // "hey looi, spin" → run "spin"
-  else { setFace('listening'); voice.speak('Yes?'); awaitingCmd = true; awaitTimer = setTimeout(() => { awaitingCmd = false; setFace('idle'); }, 6000); }
+  if (after) { handle(after); return; }                             // "hey looi, spin" → run "spin"
+  // Wake word alone → enter a CLEAR "listening for your command" state (distinct from armed).
+  awaitingCmd = true;
+  setFace('listening'); state = 'listening';
+  voice.speak('Yes?').then(() => { if (awaitingCmd) { setFace('listening'); setStatus('🔵 Go ahead, I’m listening…'); } });
+  awaitTimer = setTimeout(() => { awaitingCmd = false; state = 'idle'; setFace('idle'); setStatus(idleStatus()); }, 9000);
 });
 voice.addEventListener('listen-end', () => { if (state === 'listening') { state = 'idle'; setFace('idle'); setStatus(idleStatus()); } });
 voice.addEventListener('error', e => { if (!handsFree) { setStatus('mic: ' + e.detail.msg); state = 'idle'; setFace('idle'); } dlog('mic: ' + e.detail.msg, 'warn'); });
