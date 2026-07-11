@@ -44,6 +44,15 @@ export class Voice extends EventTarget {
         this.dispatchEvent(new CustomEvent('error', { detail: { msg: e.error } }));
       };
       this._rec = r;
+      // Watchdog: the resume-after-TTS chain can break (Chrome's utterance onend sometimes never
+      // fires; rec.start() can throw mid-restart) and the wake loop dies silently. Every 4s, if we
+      // SHOULD be listening but aren't, revive it — "Hey LOOI stopped working" was this.
+      setInterval(() => {
+        if (this._wantContinuous && !this._paused && !this.listening) {
+          this._safeStart();
+          if (this.listening) this.dispatchEvent(new CustomEvent('revived'));
+        }
+      }, 4000);
     }
     if (this.ttsSupported) {
       const pick = () => {
@@ -85,7 +94,19 @@ export class Voice extends EventTarget {
       const u = new SpeechSynthesisUtterance(text);
       if (this._voice) u.voice = this._voice;
       u.rate = 1.02; u.pitch = 1.0;
-      const done = () => { this.dispatchEvent(new Event('speak-end')); if (wasWake) setTimeout(() => this._resume(), 250); resolve(); };
+      let finished = false, guard = null, extended = 0;
+      const done = () => {
+        if (finished) return; finished = true; clearTimeout(guard);
+        this.dispatchEvent(new Event('speak-end')); if (wasWake) setTimeout(() => this._resume(), 250); resolve();
+      };
+      // Android Chrome sometimes never fires onend/onerror — without this guard the mic stays
+      // muted forever after a reply. Sized to the utterance; if speech is audibly still going
+      // when it fires, extend a few times rather than unmuting the mic mid-sentence.
+      const arm = ms => { guard = setTimeout(() => {
+        if (speechSynthesis.speaking && ++extended <= 6) { arm(2000); return; }
+        done();
+      }, ms); };
+      arm(Math.max(5000, 2500 + text.length * 90));
       u.onstart = () => this.dispatchEvent(new Event('speak-start'));
       u.onend = done;
       u.onerror = done;
