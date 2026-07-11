@@ -16,15 +16,21 @@ export class Voice extends EventTarget {
     this._voice = null;
     if (SR) {
       const r = new SR();
-      r.lang = 'en-US'; r.interimResults = true; r.continuous = false; r.maxAlternatives = 1;
+      r.lang = 'en-US'; r.interimResults = true; r.continuous = false; r.maxAlternatives = 5;  // extra guesses let us rescue a misheard wake word
       r.onresult = e => {
-        let interim = '', final = '';
+        let interim = '', final = '', alternatives = [], confidence = null;
         for (let i = e.resultIndex; i < e.results.length; i++) {
-          const t = e.results[i][0].transcript;
-          if (e.results[i].isFinal) final += t; else interim += t;
+          const res = e.results[i];
+          if (res.isFinal) {
+            final += res[0].transcript;
+            confidence = res[0].confidence;                       // 0..1; Chrome sometimes reports 0 (treat as unknown)
+            alternatives = [...res].map(a => (a.transcript || '').trim()).filter(Boolean);
+          } else {
+            interim += res[0].transcript;
+          }
         }
         if (interim) this.dispatchEvent(new CustomEvent('partial', { detail: { text: interim } }));
-        if (final)   this.dispatchEvent(new CustomEvent('final',   { detail: { text: final.trim() } }));
+        if (final)   this.dispatchEvent(new CustomEvent('final',   { detail: { text: final.trim(), alternatives, confidence } }));
       };
       r.onend = () => {
         this.listening = false;

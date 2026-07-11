@@ -81,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=19';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=19';
-import { Voice } from './voice.js?v=19';
+import { Looi }  from './looi.js?v=20';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=20';
+import { Voice } from './voice.js?v=20';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -159,12 +159,19 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 let awaitingCmd = false, awaitTimer = null;
 const WAKE = ['looi', 'louie', 'louis', 'lewis', 'loui', 'lui', 'luis', 'gooey', 'lewie'];  // STT mishears the name
 function findWake(toks) { return toks.findIndex(tok => WAKE.some(w => tokenNear(tok, w))); }
+// Among the recognizer's ranked guesses, prefer the first that actually contains the wake word.
+function pickWakeAlt(primary, alts) {
+  for (const c of [primary, ...(alts || [])]) { if (findWake(norm(c).split(' ')) >= 0) return c; }
+  return primary;
+}
 
 // Web Speech often splits one sentence into several "final" chunks, so accumulate them and
 // submit the whole phrase after a brief pause — otherwise "turn on the sofa lamp" arrives as "on".
-let cmdBuf = '', cmdTimer = null;
-function submitSoon(text) {
+let cmdBuf = '', cmdTimer = null, cmdConf = null, reasked = false;
+function submitSoon(text, conf) {
   text = (text || '').trim(); if (!text) return;
+  // Track the lowest RELIABLE confidence across fragments (Chrome reports 0 when it has none → ignore those).
+  if (typeof conf === 'number' && conf > 0) cmdConf = (cmdConf == null) ? conf : Math.min(cmdConf, conf);
   // Web Speech (continuous) re-emits a GROWING version of the same phrase — dedupe by containment
   // so "light light light" and "turn on"→"turn on the lamp" don't stack up.
   if (!cmdBuf || text.includes(cmdBuf)) cmdBuf = text;                 // first, or new is a superset
@@ -172,20 +179,37 @@ function submitSoon(text) {
   // else: already have it → ignore
   $('transcript').textContent = cmdBuf;
   clearTimeout(cmdTimer);
-  cmdTimer = setTimeout(() => { const c = cmdBuf.trim(); cmdBuf = ''; awaitingCmd = false; if (c) handle(c); }, 1100);
+  cmdTimer = setTimeout(() => {
+    const c = cmdBuf.trim(), conf = cmdConf;
+    cmdBuf = ''; cmdConf = null; awaitingCmd = false;
+    if (!c) return;
+    // Confidence gate: if the recognizer was reliably unsure, ask once for a repeat instead of guessing wrong.
+    if (typeof conf === 'number' && conf > 0 && conf < 0.5 && !reasked) {
+      reasked = true;
+      dlog(`low confidence ${conf.toFixed(2)} on "${c}" → re-ask`, 'warn');
+      voice.speak("Sorry, I didn't catch that — say it again?").then(startFollowUp);
+      return;
+    }
+    reasked = false;
+    handle(c);
+  }, 1100);
 }
 
 voice.addEventListener('partial', e => { if (!cmdBuf) $('transcript').textContent = e.detail.text; });
 voice.addEventListener('final', e => {
   const raw = (e.detail.text || '').trim(); if (!raw) return;
-  if (!handsFree) { submitSoon(raw); return; }                      // push-to-talk: accumulate fragments
-  if (awaitingCmd) { clearTimeout(awaitTimer); submitSoon(raw); return; }   // capturing a command → accumulate
-  const toks = norm(raw).split(' ');
+  const conf = e.detail.confidence;
+  if (!handsFree) { submitSoon(raw, conf); return; }                // push-to-talk: accumulate fragments
+  if (awaitingCmd) { clearTimeout(awaitTimer); submitSoon(raw, conf); return; }   // capturing a command → accumulate
+  // Listening for the wake word: scan the recognizer's alternates too — its top pick often mangles "LOOI".
+  const best = pickWakeAlt(raw, e.detail.alternatives);
+  const toks = norm(best).split(' ');
   const wi = findWake(toks);
   if (wi < 0) return;                                               // no wake word → ignore ambient speech
-  dlog(`wake heard in "${raw}"`, 'ok');
+  reasked = false;                                                  // fresh interaction
+  dlog(`wake heard in "${best}"`, 'ok');
   const after = toks.slice(wi + 1).join(' ').trim();
-  if (after) { awaitingCmd = true; submitSoon(after); return; }     // "hey looi turn on the lamp" (+ later fragments)
+  if (after) { awaitingCmd = true; submitSoon(after, conf); return; }  // "hey looi turn on the lamp" (+ later fragments)
   // Wake word alone → clear "listening for your command" state.
   awaitingCmd = true; setFace('listening'); state = 'listening';
   voice.speak('Yes?').then(() => { if (awaitingCmd) { setFace('listening'); setStatus('🔵 Go ahead, I’m listening…'); } });
