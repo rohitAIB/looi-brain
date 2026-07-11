@@ -68,9 +68,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=11';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=11';
-import { Voice } from './voice.js?v=11';
+import { Looi }  from './looi.js?v=12';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=12';
+import { Voice } from './voice.js?v=12';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -233,12 +233,15 @@ async function handle(text) {
 
   // General chat → optional LLM proxy, else honest fallback.
   const ep = localStorage.getItem('brainEndpoint');
+  dlog(`brain endpoint: ${ep || 'NOT SET'}`, ep ? 'tx' : 'warn');
   if (ep) {
     try {
+      dlog('→ asking brain…', 'tx');
       const r = await fetch(ep, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ message: text }) });
       const j = await r.json();
+      dlog(`← brain ${r.status}: "${(j.reply||'').slice(0,40)}"`, 'ok');
       return reply(j.reply || "I didn't get a reply from my brain.");
-    } catch (e) { return reply('My reasoning brain is unreachable right now.'); }
+    } catch (e) { dlog('brain fetch FAILED: ' + e.message, 'err'); return reply('My reasoning brain is unreachable right now.'); }
   }
   return reply("My reasoning brain isn't wired up yet — but I can move. Try “spin”, “come here”, or “nod”.");
 }
