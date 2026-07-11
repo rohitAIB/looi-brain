@@ -102,6 +102,16 @@ export class Voice extends EventTarget {
   }
   stopListening() { if (this._rec && this.listening) this._rec.stop(); }
 
+  // Instant recovery on return-to-foreground: backgrounding reliably corrupts the recognizer,
+  // so don't probe it — throw it away, build fresh, start now (vs waiting on the 4s watchdog).
+  forceRestart() {
+    if (!this._SR || !this._wantContinuous) return;
+    try { this._rec.onend = null; this._rec.abort(); } catch {}
+    this._startFails = 0; this._cooldownUntil = 0; this.listening = false;
+    this._buildRec();
+    this._safeStart();
+  }
+
   // Continuous wake-word listening
   listenContinuous() {
     if (!this._rec) return;
