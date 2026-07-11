@@ -219,7 +219,7 @@ export class Looi extends EventTarget {
   // Android Chrome) — means we hit something → back off, turn a random amount, keep going.
   // Runs under the gesture engine, so stop() or any new gesture cancels it and rests the
   // drive vector. Per-leg peak accel is logged so the bump threshold can be tuned from telemetry.
-  wander({ maxMs = 120_000, spd = 60, bumpAbs = 3.2 } = {}) {
+  wander({ maxMs = 120_000, spd = 95, bumpAbs = 3.2 } = {}) {
     return this._gesture(async (alive) => {
       let bumped = false, legMax = 0, baseline = 0;
       const onMotion = e => {
