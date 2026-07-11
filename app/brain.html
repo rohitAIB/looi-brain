@@ -114,7 +114,7 @@ setInterval(() => {                                             // flush batched
   const body = _logBuf.join('\n'); _logBuf = [];
   fetch(`https://ntfy.sh/${DEBUG_TOPIC}`, { method: 'POST', body, headers: { Priority: 'min', Title: `looi ${SESSION}`, Tags: 'robot' } }).catch(() => {});
 }, 1500);
-dlog(`session ${SESSION} start · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
+dlog(`session ${SESSION} start · app v25 · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
 $('status').onclick = () => $('dbg').classList.toggle('show');
 looi.addEventListener('log', e => dlog('ble: ' + e.detail.msg, e.detail.cls));
 
@@ -153,7 +153,13 @@ async function keepScreenOn() {
         wakeLock.addEventListener('release', () => { wakeLock = null; }); }
   catch (e) { dlog('wake lock failed: ' + e.message, 'warn'); }
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !wakeLock) keepScreenOn(); });
+// Backgrounding kills SpeechRecognition (Chrome policy) and releases the wake lock — on return,
+// re-acquire BOTH. This was the "switch screens and Hey LOOI stops responding" bug.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!wakeLock) keepScreenOn();
+  if (handsFree) { voice.listenContinuous(); dlog('foreground → wake loop restarted', 'tx'); }
+});
 
 // ---- Voice loop ----
 let awaitingCmd = false, awaitTimer = null;
