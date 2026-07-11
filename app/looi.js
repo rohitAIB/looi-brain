@@ -219,29 +219,39 @@ export class Looi extends EventTarget {
   // Android Chrome) — means we hit something → back off, turn a random amount, keep going.
   // Runs under the gesture engine, so stop() or any new gesture cancels it and rests the
   // drive vector. Per-leg peak accel is logged so the bump threshold can be tuned from telemetry.
-  wander({ maxMs = 120_000, spd = 95, bumpAbs = 3.2 } = {}) {
+  wander({ maxMs = 120_000, spd = 95, bumpAbs = 2.5 } = {}) {
     return this._gesture(async (alive) => {
-      let bumped = false, legMax = 0, baseline = 0;
+      let bumped = false, legMax = 0, avg = null, samples = 0, mode = 'none';
       const onMotion = e => {
-        const a = e.acceleration;                                // gravity-free
+        // Prefer gravity-free acceleration, but many phones only deliver accelerationIncludingGravity —
+        // we detect spikes as DEVIATION from a rolling baseline, so the constant 9.8 cancels out.
+        let a = e.acceleration;
+        if (a && a.x != null) mode = 'accel';
+        else { a = e.accelerationIncludingGravity; mode = (a && a.x != null) ? 'gravity' : 'none'; }
         if (!a || a.x == null) return;
+        samples++;
         const mag = Math.hypot(a.x, a.y, a.z);
-        if (mag > legMax) legMax = mag;
-        baseline = baseline * 0.95 + mag * 0.05;                 // rolling driving-vibration floor
-        if (mag > bumpAbs && mag > baseline * 3) bumped = true;  // spike well above both floors
+        if (avg == null) avg = mag;
+        const dev = Math.abs(mag - avg);
+        avg = avg * 0.9 + mag * 0.1;                             // rolling baseline (~150ms adapt)
+        if (dev > legMax) legMax = dev;
+        if (dev > bumpAbs) bumped = true;
       };
       window.addEventListener('devicemotion', onMotion);
       this._log(`wander: start (max ${Math.round(maxMs / 1000)}s)`, 'tx');
       const t0 = performance.now();
       try {
         await this.head(HEAD_REST);
+        await sleep(600);                                        // let motion events arrive before judging support
+        if (!samples) this._log('wander: NO devicemotion events — bump detect inactive (timer-only roaming)', 'warn');
         while (alive() && performance.now() - t0 < maxMs) {
           bumped = false; legMax = 0;
+          const s0 = samples;
           this.drive(spd, 0);
           const legEnd = performance.now() + 2500 + Math.random() * 2500;
           while (alive() && !bumped && performance.now() < legEnd) await sleep(50);
           if (!alive()) break;
-          this._log(`wander: leg done (bump=${bumped}, peak ${legMax.toFixed(1)} m/s²)`, bumped ? 'warn' : '');
+          this._log(`wander: leg done (bump=${bumped}, peak dev ${legMax.toFixed(1)}, src=${mode}, ${samples - s0} samp)`, bumped ? 'warn' : '');
           if (bumped) { this.drive(-90, 0); await sleep(500); if (!alive()) break; }  // back off
           const dir = Math.random() < 0.5 ? -1 : 1;              // pick a new heading (bigger after a bump)
           this.drive(0, dir * 100);
