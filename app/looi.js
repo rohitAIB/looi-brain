@@ -213,6 +213,47 @@ export class Looi extends EventTarget {
     });
   }
 
+  // ---- Wander mode ----
+  // Reactive roaming (no map, no encoders): cruise forward in random-length legs; a bump —
+  // an accelerometer spike from the docked phone (DeviceMotion, no permission needed on
+  // Android Chrome) — means we hit something → back off, turn a random amount, keep going.
+  // Runs under the gesture engine, so stop() or any new gesture cancels it and rests the
+  // drive vector. Per-leg peak accel is logged so the bump threshold can be tuned from telemetry.
+  wander({ maxMs = 120_000, spd = 60, bumpAbs = 3.2 } = {}) {
+    return this._gesture(async (alive) => {
+      let bumped = false, legMax = 0, baseline = 0;
+      const onMotion = e => {
+        const a = e.acceleration;                                // gravity-free
+        if (!a || a.x == null) return;
+        const mag = Math.hypot(a.x, a.y, a.z);
+        if (mag > legMax) legMax = mag;
+        baseline = baseline * 0.95 + mag * 0.05;                 // rolling driving-vibration floor
+        if (mag > bumpAbs && mag > baseline * 3) bumped = true;  // spike well above both floors
+      };
+      window.addEventListener('devicemotion', onMotion);
+      this._log(`wander: start (max ${Math.round(maxMs / 1000)}s)`, 'tx');
+      const t0 = performance.now();
+      try {
+        await this.head(HEAD_REST);
+        while (alive() && performance.now() - t0 < maxMs) {
+          bumped = false; legMax = 0;
+          this.drive(spd, 0);
+          const legEnd = performance.now() + 2500 + Math.random() * 2500;
+          while (alive() && !bumped && performance.now() < legEnd) await sleep(50);
+          if (!alive()) break;
+          this._log(`wander: leg done (bump=${bumped}, peak ${legMax.toFixed(1)} m/s²)`, bumped ? 'warn' : '');
+          if (bumped) { this.drive(-90, 0); await sleep(500); if (!alive()) break; }  // back off
+          const dir = Math.random() < 0.5 ? -1 : 1;              // pick a new heading (bigger after a bump)
+          this.drive(0, dir * 100);
+          await sleep(bumped ? 600 + Math.random() * 600 : 250 + Math.random() * 400);
+        }
+      } finally {
+        window.removeEventListener('devicemotion', onMotion);
+        this._log('wander: end', 'tx');
+      }
+    });
+  }
+
   nod(times = 2) {                                               // "yes" — head up/down
     return this._gesture(async (alive) => {
       for (let i = 0; i < times && alive(); i++) {
