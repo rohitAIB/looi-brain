@@ -22,7 +22,10 @@
   @keyframes pulse { 50% { box-shadow:0 0 0 16px rgba(56,139,253,.08); } }
   #transcript { position:fixed; bottom:130px; left:0; right:0; text-align:center; padding:0 24px;
                 font-size:17px; color:var(--fg); text-shadow:0 2px 8px #000; z-index:2; min-height:26px; }
-  #status { position:fixed; top:14px; left:0; right:0; text-align:center; font-size:12px; color:var(--dim); z-index:2; }
+  #status { position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:3;
+            font-size:13px; font-weight:600; color:var(--fg); background:rgba(22,27,34,.92);
+            border:1px solid var(--line); border-radius:20px; padding:7px 16px; white-space:nowrap;
+            box-shadow:0 2px 10px rgba(0,0,0,.4); }
   .right { margin-left:auto; }
   #settings { position:fixed; inset:0; background:rgba(5,7,10,.95); z-index:5; display:none; padding:20px; flex-direction:column; gap:12px; }
   #settings.show { display:flex; }
@@ -41,7 +44,8 @@
   .glow-think  { box-shadow:inset 0 0 70px 5px rgba(210,153,34,.5); }
   .glow-speak  { box-shadow:inset 0 0 70px 5px rgba(63,185,80,.5); }
   @keyframes glowpulse { 50% { box-shadow:inset 0 0 120px 12px rgba(56,139,253,.35); } }
-  #status { font-weight:600; }
+  .glow-armed { animation:armpulse 2.4s infinite; }
+  @keyframes armpulse { 50% { box-shadow:inset 0 0 75px 5px rgba(63,185,80,.34); } }
 </style>
 </head>
 <body>
@@ -77,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=13';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=13';
-import { Voice } from './voice.js?v=13';
+import { Looi }  from './looi.js?v=14';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=14';
+import { Voice } from './voice.js?v=14';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -96,7 +100,7 @@ function setFace(f) { face.setExpression(f); glow(f); }
 // ---- Debug log — on screen AND streamed to a private ntfy topic Claude reads directly ----
 const DEBUG_TOPIC = 'looi-dbg-r7k39q2x';                        // private log sink (unguessable)
 const SESSION = Math.random().toString(36).slice(2, 7);
-$('dbg').classList.add('show');
+// Debug panel hidden by default (tap the status pill to toggle) — telemetry still streams to ntfy.
 let _logBuf = [];
 function dlog(msg, cls = '') {
   const stamp = new Date().toLocaleTimeString();
