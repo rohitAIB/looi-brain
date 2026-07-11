@@ -81,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=18';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=18';
-import { Voice } from './voice.js?v=18';
+import { Looi }  from './looi.js?v=19';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=19';
+import { Voice } from './voice.js?v=19';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -164,7 +164,12 @@ function findWake(toks) { return toks.findIndex(tok => WAKE.some(w => tokenNear(
 // submit the whole phrase after a brief pause — otherwise "turn on the sofa lamp" arrives as "on".
 let cmdBuf = '', cmdTimer = null;
 function submitSoon(text) {
-  cmdBuf = (cmdBuf + ' ' + text).trim();
+  text = (text || '').trim(); if (!text) return;
+  // Web Speech (continuous) re-emits a GROWING version of the same phrase — dedupe by containment
+  // so "light light light" and "turn on"→"turn on the lamp" don't stack up.
+  if (!cmdBuf || text.includes(cmdBuf)) cmdBuf = text;                 // first, or new is a superset
+  else if (!cmdBuf.includes(text)) cmdBuf = (cmdBuf + ' ' + text).trim(); // genuinely new words
+  // else: already have it → ignore
   $('transcript').textContent = cmdBuf;
   clearTimeout(cmdTimer);
   cmdTimer = setTimeout(() => { const c = cmdBuf.trim(); cmdBuf = ''; awaitingCmd = false; if (c) handle(c); }, 1100);
