@@ -34,10 +34,19 @@
          font:10px/1.4 ui-monospace,monospace; color:var(--dim); white-space:pre-wrap; display:none; }
   #dbg.show { display:block; }
   #dbg .ok{color:var(--acc)} #dbg .warn{color:#d29922} #dbg .err{color:#f85149} #dbg .tx{color:#79c0ff}
+  #glow { position:fixed; inset:0; pointer-events:none; z-index:1; transition:box-shadow .25s; }
+  .glow-off    { box-shadow:none; }
+  .glow-armed  { box-shadow:inset 0 0 55px 3px rgba(63,185,80,.22); }        /* waiting for "Hey LOOI" */
+  .glow-listen { box-shadow:inset 0 0 85px 6px rgba(56,139,253,.55); animation:glowpulse 1.1s infinite; }
+  .glow-think  { box-shadow:inset 0 0 70px 5px rgba(210,153,34,.5); }
+  .glow-speak  { box-shadow:inset 0 0 70px 5px rgba(63,185,80,.5); }
+  @keyframes glowpulse { 50% { box-shadow:inset 0 0 120px 12px rgba(56,139,253,.35); } }
+  #status { font-weight:600; }
 </style>
 </head>
 <body>
   <canvas id="face"></canvas>
+  <div id="glow" class="glow-off"></div>
   <div id="status">idle</div>
 
   <div class="bar top">
@@ -68,9 +77,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=12';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=12';
-import { Voice } from './voice.js?v=12';
+import { Looi }  from './looi.js?v=13';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=13';
+import { Voice } from './voice.js?v=13';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -78,8 +87,11 @@ const voice = new Voice();
 const looi  = new Looi();
 
 let state = 'idle';
+let handsFree = false;                                          // declared early so glow() can read it
 const setStatus = t => $('status').textContent = t;
-const setFace = f => face.setExpression(f);
+const GLOW = { listening: 'listen', thinking: 'think', speaking: 'speak', happy: 'speak', curious: 'listen' };
+function glow(faceName) { $('glow').className = 'glow-' + (GLOW[faceName] || (handsFree ? 'armed' : 'off')); }
+function setFace(f) { face.setExpression(f); glow(f); }
 
 // ---- Debug log — on screen AND streamed to a private ntfy topic Claude reads directly ----
 const DEBUG_TOPIC = 'looi-dbg-r7k39q2x';                        // private log sink (unguessable)
@@ -140,7 +152,7 @@ async function keepScreenOn() {
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !wakeLock) keepScreenOn(); });
 
 // ---- Voice loop ----
-let handsFree = false, awaitingCmd = false, awaitTimer = null;
+let awaitingCmd = false, awaitTimer = null;
 const WAKE = ['looi', 'louie', 'louis', 'lewis', 'loui', 'lui', 'luis', 'gooey', 'lewie'];  // STT mishears the name
 function findWake(toks) { return toks.findIndex(tok => WAKE.some(w => tokenNear(tok, w))); }
 
@@ -157,7 +169,7 @@ voice.addEventListener('final', e => {
   if (after) handle(after);                                         // "hey looi, spin" → run "spin"
   else { setFace('listening'); voice.speak('Yes?'); awaitingCmd = true; awaitTimer = setTimeout(() => { awaitingCmd = false; setFace('idle'); }, 6000); }
 });
-voice.addEventListener('listen-end', () => { if (state === 'listening') { state = 'idle'; setFace('idle'); setStatus('idle'); } });
+voice.addEventListener('listen-end', () => { if (state === 'listening') { state = 'idle'; setFace('idle'); setStatus(idleStatus()); } });
 voice.addEventListener('error', e => { if (!handsFree) { setStatus('mic: ' + e.detail.msg); state = 'idle'; setFace('idle'); } dlog('mic: ' + e.detail.msg, 'warn'); });
 
 // ---- Hey LOOI hands-free toggle ----
@@ -165,13 +177,13 @@ $('wake').onclick = async () => {
   handsFree = !handsFree;
   $('wake').textContent = '🎙 Hey LOOI: ' + (handsFree ? 'ON' : 'off');
   $('talk').style.opacity = handsFree ? '0.4' : '1';
-  if (handsFree) { await keepScreenOn(); voice.listenContinuous(); dlog('hands-free ON — always listening', 'tx'); setStatus('say “Hey LOOI…”'); }
-  else { voice.stopContinuous(); awaitingCmd = false; dlog('hands-free OFF', 'warn'); setStatus('idle'); }
+  if (handsFree) { await keepScreenOn(); voice.listenContinuous(); dlog('hands-free ON — always listening', 'tx'); setStatus('🎙 Listening for “Hey LOOI”'); glow('idle'); }
+  else { voice.stopContinuous(); awaitingCmd = false; dlog('hands-free OFF', 'warn'); setStatus('idle'); glow('idle'); }
 };
 
 // Push-to-talk
 const startTalk = e => { e.preventDefault(); if (handsFree) return; if (state !== 'idle') return; if (!voice.sttSupported) { setStatus('speech recognition unavailable'); return; }
-  state = 'listening'; setFace('listening'); setStatus('listening…'); $('talk').classList.add('live'); $('transcript').textContent = ''; voice.listen(); };
+  state = 'listening'; setFace('listening'); setStatus('🔴 Listening…'); $('talk').classList.add('live'); $('transcript').textContent = ''; voice.listen(); };
 const endTalk = e => { e.preventDefault(); $('talk').classList.remove('live'); voice.stopListening(); };
 $('talk').addEventListener('touchstart', startTalk, { passive:false });
 $('talk').addEventListener('touchend', endTalk, { passive:false });
@@ -183,15 +195,13 @@ const INTENTS = [
   // multi-word / specific first
   { keys: ['come here','come over','over here','come to me','come on'], run: () => looi.approach(), say: 'On my way.' },
   { keys: ['back up','back off','move back','go back','backward','backwards','reverse'], run: () => looi.recoil(), say: 'Backing up.' },
-  { keys: ['look around','look round','scan the room','have a look','where am i'], run: () => looi.lookAround(), say: 'Looking around.' },
+  { keys: ['look around','look round','scan the room'], run: () => looi.lookAround(), say: 'Looking around.' },
   { keys: ['turn around','spin','spinning','spun','twirl','rotate'], run: () => looi.spin(1), say: 'Spinning!', expr: 'happy' },
   { keys: ['move forward','go forward','go straight','forward','ahead'], run: () => looi.forward(), say: 'Going forward.' },
   { keys: ['dance','dancing','wiggle','wiggly','boogie','party'], run: () => looi.wiggle(6), say: 'Dancing!', expr: 'happy' },
-  { keys: ['nod','yes','yeah','yep','agreed','agree','correct'], run: () => looi.nod(), say: 'Yes.', expr: 'happy' },
-  { keys: ['shake','no','nope','nah','disagree','wrong'], run: () => looi.shake(), say: 'No.' },
-  { keys: ['stop','freeze','halt','wait','stay','stand still'], run: () => looi.stop(), say: 'Stopped.', body: false },
-  { keys: ['hello','hi','hey','yo','good morning','good evening','hiya'], run: null, say: 'Hey! I can move — try telling me to spin or come here.', expr: 'happy' },
-  { keys: ['come here boy','look at me','follow me','wake up'], run: null, say: "I'm right here.", expr: 'happy' },
+  { keys: ['nod','nod your head'], run: () => looi.nod(), say: 'Yes.', expr: 'happy' },
+  { keys: ['shake your head','shake no'], run: () => looi.shake(), say: 'No.' },
+  { keys: ['stop','freeze','halt','stand still'], run: () => looi.stop(), say: 'Stopped.', body: false },
 ];
 
 function norm(s) { return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim(); }
@@ -220,9 +230,11 @@ function matchIntent(text) {
 
 // ---- The "brain": intent → action + speech ----
 async function handle(text) {
-  state = 'thinking'; setFace('thinking'); setStatus('thinking…');
+  state = 'thinking'; setFace('thinking'); setStatus('💭 Thinking…');
   dlog(`cmd: "${text}"  | robot=${looi.connected ? 'CONNECTED' : 'disconnected'}`, looi.connected ? 'ok' : 'warn');
-  const intent = matchIntent(text);
+  // Only treat SHORT phrases as local commands; longer utterances always go to the brain.
+  const wordCount = norm(text).split(' ').filter(Boolean).length;
+  const intent = wordCount <= 4 ? matchIntent(text) : null;
   if (intent) {
     const needsBody = !!intent.run && intent.body !== false;
     let say = intent.say;
@@ -246,12 +258,13 @@ async function handle(text) {
   return reply("My reasoning brain isn't wired up yet — but I can move. Try “spin”, “come here”, or “nod”.");
 }
 
+const idleStatus = () => handsFree ? '🎙 Listening for “Hey LOOI”' : 'idle';
 async function reply(say, expr = 'speaking', gesture = null) {
-  state = 'speaking'; setFace(expr); setStatus('speaking…');
+  state = 'speaking'; setFace(expr); setStatus('🗣 Speaking…');
   if (gesture && looi.connected) { try { gesture(); } catch {} }
   else if (gesture && !looi.connected) say = "I'd love to, but connect my body first. " ;
   await voice.speak(say);
-  state = 'idle'; setFace('idle'); setStatus('idle'); $('transcript').textContent = '';
+  state = 'idle'; setFace('idle'); setStatus(idleStatus()); $('transcript').textContent = '';
 }
 
 // ---- Settings ----
