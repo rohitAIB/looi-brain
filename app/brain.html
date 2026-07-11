@@ -81,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=14';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=14';
-import { Voice } from './voice.js?v=14';
+import { Looi }  from './looi.js?v=15';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=15';
+import { Voice } from './voice.js?v=15';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -194,19 +194,12 @@ $('talk').addEventListener('touchend', endTalk, { passive:false });
 $('talk').addEventListener('mousedown', startTalk);
 $('talk').addEventListener('mouseup', endTalk);
 
-// ---- Fuzzy intent engine (generous keyword lists + Levenshtein → tolerant of bad STT) ----
-const INTENTS = [
-  // multi-word / specific first
-  { keys: ['come here','come over','over here','come to me','come on'], run: () => looi.approach(), say: 'On my way.' },
-  { keys: ['back up','back off','move back','go back','backward','backwards','reverse'], run: () => looi.recoil(), say: 'Backing up.' },
-  { keys: ['look around','look round','scan the room'], run: () => looi.lookAround(), say: 'Looking around.' },
-  { keys: ['turn around','spin','spinning','spun','twirl','rotate'], run: () => looi.spin(1), say: 'Spinning!', expr: 'happy' },
-  { keys: ['move forward','go forward','go straight','forward','ahead'], run: () => looi.forward(), say: 'Going forward.' },
-  { keys: ['dance','dancing','wiggle','wiggly','boogie','party'], run: () => looi.wiggle(6), say: 'Dancing!', expr: 'happy' },
-  { keys: ['nod','nod your head'], run: () => looi.nod(), say: 'Yes.', expr: 'happy' },
-  { keys: ['shake your head','shake no'], run: () => looi.shake(), say: 'No.' },
-  { keys: ['stop','freeze','halt','stand still'], run: () => looi.stop(), say: 'Stopped.', body: false },
-];
+// ---- Action map: the brain returns an action name, the phone runs the matching gesture ----
+const ACTIONS = {
+  spin: () => looi.spin(1), come: () => looi.approach(), back: () => looi.recoil(),
+  forward: () => looi.forward(), nod: () => looi.nod(), shake: () => looi.shake(),
+  dance: () => looi.wiggle(6), look_around: () => looi.lookAround(), stop: () => looi.stop(),
+};
 
 function norm(s) { return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim(); }
 function lev(a, b) {
@@ -221,45 +214,31 @@ function tokenNear(tok, key) {                                   // fuzzy single
   if (tok === key || tok.startsWith(key) || key.startsWith(tok)) return true;
   return lev(tok, key) <= (key.length <= 4 ? 1 : 2);            // tolerate 1–2 char STT errors
 }
-function matchIntent(text) {
-  const t = norm(text), toks = t.split(' ');
-  for (const intent of INTENTS) {
-    for (const key of intent.keys) {
-      const hit = key.includes(' ') ? t.includes(key) : toks.some(tok => tokenNear(tok, key));
-      if (hit) return intent;
-    }
-  }
-  return null;
-}
-
-// ---- The "brain": intent → action + speech ----
+// ---- The "brain": everything goes to the LLM, which decides reply + body action ----
 async function handle(text) {
   state = 'thinking'; setFace('thinking'); setStatus('💭 Thinking…');
   dlog(`cmd: "${text}"  | robot=${looi.connected ? 'CONNECTED' : 'disconnected'}`, looi.connected ? 'ok' : 'warn');
-  // Only treat SHORT phrases as local commands; longer utterances always go to the brain.
-  const wordCount = norm(text).split(' ').filter(Boolean).length;
-  const intent = wordCount <= 4 ? matchIntent(text) : null;
-  if (intent) {
-    const needsBody = !!intent.run && intent.body !== false;
-    let say = intent.say;
-    if (intent.run && looi.connected) { try { intent.run(); } catch {} }
-    else if (needsBody && !looi.connected) say = 'Connect my body first, then I can do that.';
-    return reply(say, intent.expr || 'speaking', null);   // gesture already fired above
+
+  // Instant local safety reflex: "stop" halts immediately, no network round-trip.
+  const t = norm(text);
+  if (/\bstop\b|\bfreeze\b|\bhalt\b/.test(t) && t.split(' ').length <= 2) {
+    if (looi.connected) looi.stop();
+    return reply('Stopped.', 'speaking', null);
   }
 
-  // General chat → optional LLM proxy, else honest fallback.
   const ep = localStorage.getItem('brainEndpoint');
-  dlog(`brain endpoint: ${ep || 'NOT SET'}`, ep ? 'tx' : 'warn');
-  if (ep) {
-    try {
-      dlog('→ asking brain…', 'tx');
-      const r = await fetch(ep, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ message: text }) });
-      const j = await r.json();
-      dlog(`← brain ${r.status}: "${(j.reply||'').slice(0,40)}"`, 'ok');
-      return reply(j.reply || "I didn't get a reply from my brain.");
-    } catch (e) { dlog('brain fetch FAILED: ' + e.message, 'err'); return reply('My reasoning brain is unreachable right now.'); }
-  }
-  return reply("My reasoning brain isn't wired up yet — but I can move. Try “spin”, “come here”, or “nod”.");
+  if (!ep) { dlog('brain endpoint NOT SET', 'warn'); return reply('My brain is not connected yet — set my endpoint in settings.'); }
+  try {
+    dlog('→ asking brain…', 'tx');
+    const r = await fetch(ep, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ message: text }) });
+    const j = await r.json();
+    dlog(`← brain ${r.status} [${j.action || 'none'}]: "${(j.reply||'').slice(0,36)}"`, 'ok');
+    let say = j.reply || '';
+    const act = ACTIONS[j.action];
+    if (act && looi.connected) { try { act(); } catch {} }
+    else if (act && !looi.connected) say = 'Connect my body first and I can do that.';
+    return reply(say || "I'm not sure how to answer that.", act ? 'happy' : 'speaking', null);
+  } catch (e) { dlog('brain fetch FAILED: ' + e.message, 'err'); return reply('My brain is unreachable right now.'); }
 }
 
 const idleStatus = () => handsFree ? '🎙 Listening for “Hey LOOI”' : 'idle';
