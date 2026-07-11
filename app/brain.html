@@ -81,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=21';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=21';
-import { Voice } from './voice.js?v=21';
+import { Looi }  from './looi.js?v=22';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=22';
+import { Voice } from './voice.js?v=22';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -339,6 +339,25 @@ async function reply(say, expr = 'speaking', gesture = null) {
 $('endpoint').value = localStorage.getItem('brainEndpoint') || '';
 $('gear').onclick = () => $('settings').classList.add('show');
 $('closeSettings').onclick = () => { const v = $('endpoint').value.trim(); v ? localStorage.setItem('brainEndpoint', v) : localStorage.removeItem('brainEndpoint'); $('settings').classList.remove('show'); };
+
+// ---- Proactive briefs: poll the brain for queued speech and say it out loud ----
+// The brain enqueues a morning brief; we drain it here when the app is awake & idle.
+// (If the app is closed/backgrounded, the brain pushes an ntfy fallback instead.)
+function brainBase() { const ep = localStorage.getItem('brainEndpoint'); try { return ep ? new URL(ep).origin : null; } catch { return null; } }
+async function pollPending() {
+  const base = brainBase(); if (!base) return;
+  if (state !== 'idle' || document.visibilityState !== 'visible') return;   // don't interrupt; only when awake+foreground
+  let items = [];
+  try { const r = await fetch(`${base}/pending`, { cache: 'no-store' }); items = (await r.json()).items || []; }
+  catch { return; }
+  for (const item of items) {
+    dlog(`brief #${item.id}: "${(item.text || '').slice(0, 40)}"`, 'ok');
+    state = 'speaking'; setFace('speaking'); setStatus('🗣 Brief…'); $('transcript').textContent = item.text;
+    await voice.speak(item.text);
+    state = 'idle'; setFace('idle'); setStatus(idleStatus()); $('transcript').textContent = '';
+  }
+}
+setInterval(pollPending, 20000);
 
 setStatus('idle');
 </script>
