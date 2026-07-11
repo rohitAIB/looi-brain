@@ -81,9 +81,9 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=29';   // bump on every module change — busts Chrome's module cache
-import { Face }  from './face.js?v=29';
-import { Voice } from './voice.js?v=29';
+import { Looi }  from './looi.js?v=30';   // bump on every module change — busts Chrome's module cache
+import { Face }  from './face.js?v=30';
+import { Voice } from './voice.js?v=30';
 
 const $ = id => document.getElementById(id);
 const face  = new Face($('face'));  face.start();
@@ -116,7 +116,7 @@ setInterval(() => {                                             // flush batched
   const body = _logBuf.join('\n'); _logBuf = [];
   fetch(`https://ntfy.sh/${DEBUG_TOPIC}`, { method: 'POST', body, headers: { Priority: 'min', Title: `looi ${SESSION}`, Tags: 'robot' } }).catch(() => {});
 }, 1500);
-dlog(`session ${SESSION} start · app v29 · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
+dlog(`session ${SESSION} start · app v30 · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
 $('status').onclick = () => $('dbg').classList.toggle('show');
 looi.addEventListener('log', e => dlog('ble: ' + e.detail.msg, e.detail.cls));
 
@@ -246,12 +246,62 @@ $('talk').addEventListener('touchend', endTalk, { passive:false });
 $('talk').addEventListener('mousedown', startTalk);
 $('talk').addEventListener('mouseup', endTalk);
 
+// ---- Vision wander: stop → look (camera frame → brain /see → Gemini) → go/turn ----
+// The docked phone's front camera faces forward; each cycle asks "is the floor ahead clear?"
+// Falls back to blind bump-wander if the camera or brain is unavailable.
+let camStream = null, camVideo = null, wanderActive = false;
+async function captureFrame() {
+  if (!camStream) {
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 320 }, height: { ideal: 240 } }, audio: false });
+    camVideo = document.createElement('video');
+    camVideo.srcObject = camStream; camVideo.playsInline = true; camVideo.muted = true;
+    await camVideo.play();
+    await new Promise(r => setTimeout(r, 350));                 // let exposure settle
+    dlog(`camera on (${camVideo.videoWidth}x${camVideo.videoHeight})`, 'ok');
+  }
+  const c = document.createElement('canvas');
+  c.width = camVideo.videoWidth || 320; c.height = camVideo.videoHeight || 240;
+  c.getContext('2d').drawImage(camVideo, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.55).split(',')[1];
+}
+function releaseCamera() {
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; camVideo = null; dlog('camera off'); }
+}
+async function wanderVision(maxMs = 120000) {
+  const base = brainBase();
+  wanderActive = true;
+  dlog('wander(vision): start', 'tx');
+  const t0 = performance.now();
+  try {
+    while (wanderActive && looi.connected && performance.now() - t0 < maxMs) {
+      let v = null;
+      try {
+        const jpeg = await captureFrame();
+        const r = await fetch(`${base}/see`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: jpeg }) });
+        if (r.ok) v = await r.json();
+      } catch (e) { dlog('see: ' + e.message, 'warn'); }
+      if (!wanderActive || !looi.connected) break;
+      if (v) dlog(`see: ${v.clear ? 'CLEAR' : 'blocked → ' + v.turn} — ${(v.why || '').slice(0, 48)}`, v.clear ? 'ok' : 'warn');
+      if (!v) { looi.drive(60, 0); await new Promise(r => setTimeout(r, 900)); }          // vision down → cautious burst
+      else if (v.clear) { looi.drive(95, 0); await new Promise(r => setTimeout(r, 1300)); } // open floor → go
+      else { looi.drive(0, v.turn === 'left' ? -100 : 100); await new Promise(r => setTimeout(r, 480 + Math.random() * 250)); } // turn to the open side
+      looi.drive(0, 0);
+    }
+  } finally { wanderActive = false; looi.drive(0, 0); releaseCamera(); dlog('wander(vision): end', 'tx'); }
+}
+function stopWander() { wanderActive = false; }
+async function startWander() {
+  try { await captureFrame(); }                                  // camera check — prompt fires here on first use
+  catch (e) { dlog('camera unavailable (' + e.message + ') → blind wander', 'warn'); looi.wander(); return; }
+  wanderVision();
+}
+
 // ---- Action map: the brain returns an action name, the phone runs the matching gesture ----
 const ACTIONS = {
   spin: () => looi.spin(1), come: () => looi.approach(), back: () => looi.recoil(),
   forward: () => looi.forward(), nod: () => looi.nod(), shake: () => looi.shake(),
-  dance: () => looi.wiggle(6), look_around: () => looi.lookAround(), stop: () => looi.stop(),
-  wander: () => looi.wander(),
+  dance: () => looi.wiggle(6), look_around: () => looi.lookAround(), stop: () => { stopWander(); looi.stop(); },
+  wander: () => startWander(),
 };
 
 function norm(s) { return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim(); }
@@ -304,6 +354,7 @@ async function handle(text) {
   // Instant local safety reflex: "stop" halts immediately, no network round-trip.
   const t = norm(text);
   if (/\bstop\b|\bfreeze\b|\bhalt\b/.test(t) && t.split(' ').length <= 2) {
+    stopWander();
     if (looi.connected) looi.stop();
     return reply('Stopped.', 'speaking', null);
   }
@@ -317,6 +368,7 @@ async function handle(text) {
     dlog(`← brain ${r.status} [${j.action || 'none'}]: "${(j.reply||'').slice(0,36)}"`, 'ok');
     let say = j.reply || '';
     const act = ACTIONS[j.action];
+    if (j.action && j.action !== 'none' && j.action !== 'wander') stopWander();   // new command interrupts roaming
     if (act && looi.connected) { try { act(); } catch {} }
     else if (act && !looi.connected) say = 'Connect my body first and I can do that.';
     await reply(say || "I'm not sure how to answer that.", act ? 'happy' : 'speaking', null);
