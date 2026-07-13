@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>LOOI · Sensor Decode</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; background: #0d1117; color: #e6edf3; font: 14px/1.4 -apple-system, system-ui, sans-serif; }
+  header { padding: 10px 12px; background: #161b22; border-bottom: 1px solid #30363d; position: sticky; top: 0; z-index: 5; }
+  h1 { margin: 0 0 4px; font-size: 15px; }
+  .hint { color: #8b949e; font-size: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; align-items: center; }
+  button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px;
+           padding: 9px 12px; font-size: 13px; font-weight: 600; }
+  button:active { background: #30363d; }
+  button.primary { background: #238636; border-color: #2ea043; }
+  button.mark { background: #1f2937; border-color: #374151; }
+  #status { font-size: 12px; color: #8b949e; padding: 0 12px 6px; }
+  label.tog { font-size: 12px; color: #8b949e; display: inline-flex; align-items: center; gap: 5px; }
+  #log { padding: 8px 12px 60px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+         font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  .line { padding: 2px 0; border-bottom: 1px solid #161b22; }
+  .t { color: #6e7681; }
+  .ch-SENS { color: #58a6ff; }      /* FED5 */
+  .ch-TELE { color: #d29922; }      /* FED9 */
+  .ch-sys  { color: #8b949e; }
+  .ch-err  { color: #f85149; }
+  .chg { background: #bb8009; color: #0d1117; border-radius: 3px; padding: 0 2px; font-weight: 700; }
+  .divider { color: #7ee787; font-weight: 700; padding: 6px 0 2px; border-top: 1px dashed #30363d; }
+</style>
+</head>
+<body>
+<header>
+  <h1>LOOI · Sensor Decode</h1>
+  <div class="hint">Connect, then trigger <b>one sensor at a time</b>. Tap a marker first, then do the action.
+  <b>Changed bytes are highlighted.</b> When done, Copy log &rarr; send to Claude.</div>
+</header>
+
+<div class="row">
+  <button id="connect" class="primary">Connect</button>
+  <button id="disconnect">Disconnect</button>
+  <label class="tog"><input type="checkbox" id="onlyChanges" checked> only show changes</label>
+</div>
+<div class="row">
+  <button class="mark" data-mark="HAND IN FRONT (ToF / obstacle)">✋ front</button>
+  <button class="mark" data-mark="LIFT / EDGE (cliff)">🔺 cliff</button>
+  <button class="mark" data-mark="TOUCH / PET">👆 touch</button>
+  <button class="mark" data-mark="TILT / PICK UP (IMU)">🔄 tilt</button>
+  <button class="mark" data-mark="IDLE (baseline, don't touch)">💤 idle</button>
+  <button id="copy">📋 Copy log</button>
+  <button id="clear">Clear</button>
+</div>
+<div id="status">not connected</div>
+<div id="log"></div>
+
+<script type="module">
+import { Looi } from './looi.js';
+
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const onlyChanges = document.getElementById('onlyChanges');
+const looi = new Looi();
+const last = {};           // last byte array per channel, for diffing
+const textBuf = [];        // plain-text mirror for Copy
+let t0 = performance.now();
+
+function stamp() { return (performance.now() - t0).toFixed(0).padStart(6) + 'ms'; }
+
+function addLine(cls, htmlBody, textBody) {
+  const div = document.createElement('div');
+  div.className = 'line ' + cls;
+  div.innerHTML = htmlBody;
+  logEl.appendChild(div);
+  textBuf.push(textBody);
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function sys(msg, cls = 'ch-sys') {
+  addLine(cls, `<span class="t">${stamp()}</span> ${msg}`, `${stamp()}  ${msg}`);
+}
+
+function onTelemetry(key, bytes) {
+  const prev = last[key];
+  const changed = !prev || prev.length !== bytes.length || bytes.some((b, i) => b !== prev[i]);
+  last[key] = bytes.slice();
+  if (onlyChanges.checked && !changed && prev) return;   // suppress idle repeats
+
+  const hex = bytes.map((b, i) => {
+    const s = b.toString(16).padStart(2, '0');
+    return (prev && prev[i] !== b) ? `<span class="chg">${s}</span>` : s;
+  }).join(' ');
+  const hexPlain = bytes.map(b => b.toString(16).padStart(2, '0')).join(' ');
+  const dec = bytes.join(',');
+
+  addLine('ch-' + key,
+    `<span class="t">${stamp()}</span> <b>${key}</b> [${bytes.length}]  ${hex}`,
+    `${stamp()}  ${key}[${bytes.length}]  ${hexPlain}   dec:${dec}`);
+}
+
+looi.addEventListener('log',          e => sys(e.detail.msg, e.detail.cls === 'err' ? 'ch-err' : 'ch-sys'));
+looi.addEventListener('connected',    () => { statusEl.textContent = '● connected — trigger sensors now'; sys('=== CONNECTED ===', 'divider'); });
+looi.addEventListener('disconnected', () => { statusEl.textContent = '○ disconnected'; sys('=== DISCONNECTED ===', 'ch-err'); });
+looi.addEventListener('battery',      e => sys('battery ' + e.detail.value + '%'));
+looi.addEventListener('telemetry',    e => onTelemetry(e.detail.key, e.detail.bytes));
+
+document.getElementById('connect').onclick = async () => {
+  statusEl.textContent = 'connecting…';
+  try { await looi.connect(); } catch (e) { sys('connect failed: ' + e.message, 'ch-err'); statusEl.textContent = 'connect failed'; }
+};
+document.getElementById('disconnect').onclick = () => looi.disconnect();
+
+document.querySelectorAll('button.mark').forEach(b =>
+  b.onclick = () => { const m = b.dataset.mark; addLine('divider', `<span class="t">${stamp()}</span> ── ${m} ──`, `\n${stamp()}  ── ${m} ──`); });
+
+document.getElementById('copy').onclick = async () => {
+  try { await navigator.clipboard.writeText(textBuf.join('\n')); statusEl.textContent = '📋 copied ' + textBuf.length + ' lines'; }
+  catch { statusEl.textContent = 'copy failed — long-press the log to select'; }
+};
+document.getElementById('clear').onclick = () => { logEl.innerHTML = ''; textBuf.length = 0; for (const k in last) delete last[k]; t0 = performance.now(); };
+
+sys('ready. Chrome on Android over HTTPS. Tap Connect.');
+</script>
+</body>
+</html>
