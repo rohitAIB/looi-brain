@@ -9,21 +9,24 @@
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { height: 100%; }
   body { margin: 0; background: #0d1117; color: #e6edf3; font: 14px/1.4 -apple-system, system-ui, sans-serif;
-         display: flex; flex-direction: column; overflow: hidden; }          /* body never scrolls */
+         display: flex; flex-direction: column; overflow: hidden; }
   header { padding: 6px 10px; background: #161b22; border-bottom: 1px solid #30363d; flex: 0 0 auto; }
   h1 { margin: 0; font-size: 14px; display: inline; }
   .hint { color: #8b949e; font-size: 11px; }
+  .warn { color: #f0a020; }
   .bar { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 10px; background: #161b22;
-         border-bottom: 1px solid #30363d; flex: 0 0 auto; align-items: center; }  /* fixed toolbar */
+         border-bottom: 1px solid #30363d; flex: 0 0 auto; align-items: center; }
   button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 7px;
-           padding: 7px 10px; font-size: 12px; font-weight: 600; }
+           padding: 7px 10px; font-size: 12px; font-weight: 600; touch-action: manipulation; }
   button:active { background: #30363d; }
   button.primary { background: #238636; border-color: #2ea043; }
   button.mark { background: #1f2937; border-color: #374151; }
+  button.drive { background: #1d3a5f; border-color: #2b5c93; }
+  button#stop { background: #5a1e1e; border-color: #8a2a2a; }
   label.tog { font-size: 11px; color: #8b949e; display: inline-flex; align-items: center; gap: 4px; }
   #status { font-size: 11px; color: #8b949e; padding: 3px 10px; background: #161b22; flex: 0 0 auto;
             border-bottom: 1px solid #30363d; }
-  #log { flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch;    /* ONLY the log scrolls */
+  #log { flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch;
          padding: 6px 10px 20px; font-family: ui-monospace, Menlo, Consolas, monospace;
          font-size: 12px; white-space: pre-wrap; word-break: break-all; }
   .line { padding: 2px 0; border-bottom: 1px solid #161b22; }
@@ -39,21 +42,23 @@
 <body>
 <header>
   <h1>LOOI · Sensor Decode</h1>
-  <span class="hint">— tap marker, then trigger one sensor. Changed bytes highlighted.</span>
+  <span class="hint">Auto-streams sensor lines to Claude (heartbeats skipped).
+  <span class="warn">Drive test: on the FLOOR or hold it — not toward a desk edge.</span></span>
 </header>
 
 <div class="bar">
   <button id="connect" class="primary">Connect</button>
   <button id="disconnect">Disc</button>
   <label class="tog"><input type="checkbox" id="onlyChanges" checked> changes only</label>
-  <button class="mark" data-mark="HAND IN FRONT (ToF / obstacle)">✋ front</button>
-  <button class="mark" data-mark="LIFT / EDGE (cliff)">🔺 cliff</button>
-  <button class="mark" data-mark="TOUCH / PET">👆 touch</button>
-  <button class="mark" data-mark="TILT / PICK UP (IMU)">🔄 tilt</button>
+  <button class="mark" data-mark="HAND IN FRONT (ToF)">✋ front</button>
   <button class="mark" data-mark="IDLE baseline">💤 idle</button>
-  <button id="send" class="primary">📡 Flush now</button>
-  <button id="copy">📋 Copy</button>
+  <button id="flush">📡 Flush now</button>
   <button id="clear">Clear</button>
+</div>
+<div class="bar">
+  <button class="drive" id="fwd">▲ HOLD: drive forward</button>
+  <button class="drive" id="fwdslow">△ HOLD: creep</button>
+  <button id="stop">◼ STOP</button>
 </div>
 <div id="status">not connected</div>
 <div id="log"></div>
@@ -66,25 +71,28 @@ const statusEl = document.getElementById('status');
 const onlyChanges = document.getElementById('onlyChanges');
 const looi = new Looi();
 const last = {};
-const textBuf = [];
+const textBuf = [];       // everything (for on-screen / Copy)
+const streamBuf = [];     // ONLY sensor-relevant lines → ntfy (no heartbeats)
 let t0 = performance.now();
 let streaming = false;
 
 function stamp() { return (performance.now() - t0).toFixed(0).padStart(6) + 'ms'; }
 
-// Auto-scroll ONLY if the user is already near the bottom of the log — never yank them down.
-function addLine(cls, htmlBody, textBody) {
+// stream=true → also queued for ntfy. Auto-scroll only if already at bottom.
+function addLine(cls, htmlBody, textBody, stream) {
   const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 50;
   const div = document.createElement('div');
   div.className = 'line ' + cls;
   div.innerHTML = htmlBody;
   logEl.appendChild(div);
   textBuf.push(textBody);
-  if (atBottom) logEl.scrollTop = logEl.scrollHeight;   // scroll the LOG, not the window
+  if (stream) streamBuf.push(textBody);
+  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
 }
 
-function sys(msg, cls = 'ch-sys') {
-  addLine(cls, `<span class="t">${stamp()}</span> ${msg}`, `${stamp()}  ${msg}`);
+// sys lines are screen-only by default (heartbeats never stream).
+function sys(msg, cls = 'ch-sys', stream = false) {
+  addLine(cls, `<span class="t">${stamp()}</span> ${msg}`, `${stamp()}  ${msg}`, stream);
 }
 
 function onTelemetry(key, bytes) {
@@ -100,13 +108,14 @@ function onTelemetry(key, bytes) {
   const hexPlain = bytes.map(b => b.toString(16).padStart(2, '0')).join(' ');
   addLine('ch-' + key,
     `<span class="t">${stamp()}</span> <b>${key}</b> [${bytes.length}]  ${hex}`,
-    `${stamp()}  ${key}[${bytes.length}]  ${hexPlain}   dec:${bytes.join(',')}`);
+    `${stamp()}  ${key}[${bytes.length}]  ${hexPlain}   dec:${bytes.join(',')}`,
+    true);                                   // sensor packets DO stream
 }
 
-looi.addEventListener('log',          e => sys(e.detail.msg, e.detail.cls === 'err' ? 'ch-err' : 'ch-sys'));
-looi.addEventListener('connected',    () => { streaming = true; statusEl.textContent = '● connected — auto-streaming to Claude'; sys('=== CONNECTED ===', 'divider'); });
-looi.addEventListener('disconnected', () => { streaming = false; statusEl.textContent = '○ disconnected'; sys('=== DISCONNECTED ===', 'ch-err'); });
-looi.addEventListener('battery',      e => sys('battery ' + e.detail.value + '%'));
+looi.addEventListener('log',          e => sys(e.detail.msg, e.detail.cls === 'err' ? 'ch-err' : 'ch-sys'));  // screen only
+looi.addEventListener('connected',    () => { streaming = true;  statusEl.textContent = '● connected — streaming sensor lines'; sys('=== CONNECTED ===', 'divider', true); });
+looi.addEventListener('disconnected', () => { streaming = false; statusEl.textContent = '○ disconnected'; sys('=== DISCONNECTED ===', 'ch-err', true); });
+looi.addEventListener('battery',      e => sys('battery ' + e.detail.value + '%'));   // screen only
 looi.addEventListener('telemetry',    e => onTelemetry(e.detail.key, e.detail.bytes));
 
 document.getElementById('connect').onclick = async () => {
@@ -116,38 +125,43 @@ document.getElementById('connect').onclick = async () => {
 document.getElementById('disconnect').onclick = () => looi.disconnect();
 
 document.querySelectorAll('button.mark').forEach(b =>
-  b.onclick = () => addLine('divider', `<span class="t">${stamp()}</span> ── ${b.dataset.mark} ──`, `\n${stamp()}  ── ${b.dataset.mark} ──`));
+  b.onclick = () => addLine('divider', `<span class="t">${stamp()}</span> ── ${b.dataset.mark} ──`, `\n${stamp()}  ── ${b.dataset.mark} ──`, true));
 
-document.getElementById('copy').onclick = async () => {
-  try { await navigator.clipboard.writeText(textBuf.join('\n')); statusEl.textContent = '📋 copied ' + textBuf.length + ' lines'; }
-  catch { statusEl.textContent = 'copy failed — long-press the log to select'; }
-};
-// Auto-stream to ntfy (like the Jarvis app): every 2.5s, POST any new lines. No button needed.
+// ---- Drive controls (to wake a motion-gated ToF sensor) ----
+function driveHold(btn, speed, label) {
+  const start = () => { try { looi.drive(speed, 0); } catch {} addLine('divider', `<span class="t">${stamp()}</span> ── DRIVE ${label} ──`, `\n${stamp()}  ── DRIVE ${label} ──`, true); };
+  const stop  = () => { try { looi.drive(0, 0); } catch {} };
+  btn.addEventListener('pointerdown', e => { e.preventDefault(); start(); });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => btn.addEventListener(ev, stop));
+}
+driveHold(document.getElementById('fwd'), 80, 'FWD');
+driveHold(document.getElementById('fwdslow'), 45, 'CREEP');
+document.getElementById('stop').onclick = () => { try { looi.drive(0, 0); } catch {} };
+
+// ---- Auto-stream to ntfy: sensor lines only, every 5s, chunked ----
 const NTFY = 'https://ntfy.sh/looi-dbg-r7k39q2x';
 let sentIdx = 0, seq = 0, flushing = false;
 async function flush(force) {
   if (flushing) return;
   if (!streaming && !force) return;
-  const chunk = textBuf.slice(sentIdx);
+  const chunk = streamBuf.slice(sentIdx);
   if (!chunk.length) { if (force) statusEl.textContent = 'nothing new to send'; return; }
   flushing = true;
-  const end = textBuf.length;
+  const end = streamBuf.length;
   const body = chunk.join('\n');
   try {
     for (let i = 0; i < body.length; i += 1500) {
       seq++;
       await fetch(NTFY, { method: 'POST', headers: { Title: `looi-sensors #${seq}` }, body: body.slice(i, i + 1500) });
-      await new Promise(r => setTimeout(r, 250));
+      await new Promise(r => setTimeout(r, 300));
     }
     sentIdx = end;
-    statusEl.textContent = `📡 auto-streaming — ${end} lines sent`;
+    statusEl.textContent = `📡 streamed ${end} sensor line(s)`;
   } catch (e) { statusEl.textContent = 'stream err: ' + e.message; }
   finally { flushing = false; }
 }
-setInterval(() => flush(false), 2500);
-document.getElementById('send').onclick = () => flush(true);
-
-document.getElementById('clear').onclick = () => { logEl.innerHTML = ''; textBuf.length = 0; for (const k in last) delete last[k]; t0 = performance.now(); };
+setInterval(() => flush(false), 5000);
+document.getElementById('flush').onclick = () => flush(true);
 
 sys('ready. Tap Connect.');
 </script>
