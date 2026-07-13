@@ -51,7 +51,7 @@
   <button class="mark" data-mark="TOUCH / PET">👆 touch</button>
   <button class="mark" data-mark="TILT / PICK UP (IMU)">🔄 tilt</button>
   <button class="mark" data-mark="IDLE baseline">💤 idle</button>
-  <button id="send" class="primary">📡 Send to Claude</button>
+  <button id="send" class="primary">📡 Flush now</button>
   <button id="copy">📋 Copy</button>
   <button id="clear">Clear</button>
 </div>
@@ -68,6 +68,7 @@ const looi = new Looi();
 const last = {};
 const textBuf = [];
 let t0 = performance.now();
+let streaming = false;
 
 function stamp() { return (performance.now() - t0).toFixed(0).padStart(6) + 'ms'; }
 
@@ -103,8 +104,8 @@ function onTelemetry(key, bytes) {
 }
 
 looi.addEventListener('log',          e => sys(e.detail.msg, e.detail.cls === 'err' ? 'ch-err' : 'ch-sys'));
-looi.addEventListener('connected',    () => { statusEl.textContent = '● connected — trigger sensors now'; sys('=== CONNECTED ===', 'divider'); });
-looi.addEventListener('disconnected', () => { statusEl.textContent = '○ disconnected'; sys('=== DISCONNECTED ===', 'ch-err'); });
+looi.addEventListener('connected',    () => { streaming = true; statusEl.textContent = '● connected — auto-streaming to Claude'; sys('=== CONNECTED ===', 'divider'); });
+looi.addEventListener('disconnected', () => { streaming = false; statusEl.textContent = '○ disconnected'; sys('=== DISCONNECTED ===', 'ch-err'); });
 looi.addEventListener('battery',      e => sys('battery ' + e.detail.value + '%'));
 looi.addEventListener('telemetry',    e => onTelemetry(e.detail.key, e.detail.bytes));
 
@@ -121,23 +122,30 @@ document.getElementById('copy').onclick = async () => {
   try { await navigator.clipboard.writeText(textBuf.join('\n')); statusEl.textContent = '📋 copied ' + textBuf.length + ' lines'; }
   catch { statusEl.textContent = 'copy failed — long-press the log to select'; }
 };
+// Auto-stream to ntfy (like the Jarvis app): every 2.5s, POST any new lines. No button needed.
 const NTFY = 'https://ntfy.sh/looi-dbg-r7k39q2x';
-document.getElementById('send').onclick = async () => {
-  const full = textBuf.join('\n');
-  if (!full.trim()) { statusEl.textContent = 'nothing to send yet'; return; }
-  const CH = 1500, parts = [];
-  for (let i = 0; i < full.length; i += CH) parts.push(full.slice(i, i + CH));
-  statusEl.textContent = `sending ${parts.length} part(s)…`;
+let sentIdx = 0, seq = 0, flushing = false;
+async function flush(force) {
+  if (flushing) return;
+  if (!streaming && !force) return;
+  const chunk = textBuf.slice(sentIdx);
+  if (!chunk.length) { if (force) statusEl.textContent = 'nothing new to send'; return; }
+  flushing = true;
+  const end = textBuf.length;
+  const body = chunk.join('\n');
   try {
-    await fetch(NTFY, { method: 'POST', headers: { Title: 'looi-sensors BEGIN' }, body: `===LOOI-SENSORS BEGIN (${parts.length} parts)===` });
-    for (let i = 0; i < parts.length; i++) {
-      await fetch(NTFY, { method: 'POST', headers: { Title: `looi-sensors ${i + 1}/${parts.length}` }, body: `SENSORS ${i + 1}/${parts.length}\n${parts[i]}` });
-      await new Promise(r => setTimeout(r, 350));
+    for (let i = 0; i < body.length; i += 1500) {
+      seq++;
+      await fetch(NTFY, { method: 'POST', headers: { Title: `looi-sensors #${seq}` }, body: body.slice(i, i + 1500) });
+      await new Promise(r => setTimeout(r, 250));
     }
-    await fetch(NTFY, { method: 'POST', headers: { Title: 'looi-sensors END' }, body: '===LOOI-SENSORS END===' });
-    statusEl.textContent = `📡 sent ${parts.length} part(s) to Claude`;
-  } catch (e) { statusEl.textContent = 'send failed: ' + e.message; }
-};
+    sentIdx = end;
+    statusEl.textContent = `📡 auto-streaming — ${end} lines sent`;
+  } catch (e) { statusEl.textContent = 'stream err: ' + e.message; }
+  finally { flushing = false; }
+}
+setInterval(() => flush(false), 2500);
+document.getElementById('send').onclick = () => flush(true);
 
 document.getElementById('clear').onclick = () => { logEl.innerHTML = ''; textBuf.length = 0; for (const k in last) delete last[k]; t0 = performance.now(); };
 
