@@ -62,8 +62,9 @@
   <button id="stop">◼ STOP</button>
 </div>
 <div class="bar">
+  <button class="primary" id="tof">🎯 poll ToF (0x02)</button>
   <button class="drive" id="probe">🔎 next FEDA probe</button>
-  <span id="probeval" class="hint">probe: — &nbsp; (tap, then wave hand close & watch for a new FED9 line)</span>
+  <span id="probeval" class="hint">tap poll ToF, then move an object close↔far in front</span>
 </div>
 <div id="status">not connected</div>
 <div id="log"></div>
@@ -166,6 +167,16 @@ document.getElementById('probe').onclick = async () => {
   document.getElementById('probeval').textContent = `probe FEDA=[${hx}]  (${((probeIdx - 1) % PROBES.length) + 1}/${PROBES.length}) — now wave hand close`;
   addLine('divider', `<span class="t">${stamp()}</span> ══ PROBE FEDA=[${hx}] ══`, `\n${stamp()}  ══ PROBE FEDA=[${hx}] ══`, true);
   try { await looi.writeChar('HAND', p); } catch (e) { sys('probe write err: ' + e.message, 'ch-err'); }
+};
+
+// ToF poll: fire FEDA=0x02 repeatedly; if it's a distance poll, FED9 '10 ..' packets will track an object.
+let tofTimer = null;
+document.getElementById('tof').onclick = () => {
+  const btn = document.getElementById('tof');
+  if (tofTimer) { clearInterval(tofTimer); tofTimer = null; btn.textContent = '🎯 poll ToF (0x02)'; statusEl.textContent = 'ToF poll stopped'; return; }
+  btn.textContent = '⏹ stop ToF poll';
+  addLine('divider', `<span class="t">${stamp()}</span> ══ ToF POLL START (FEDA 0x02 @3/s) — move object close↔far ══`, `\n${stamp()}  ══ ToF POLL START ══`, true);
+  tofTimer = setInterval(() => { looi.writeChar('HAND', [0x02]).catch(() => {}); }, 320);
 };
 
 // ---- Auto-stream to the brain-service (reliable local pipe, same endpoint the app uses) ----
