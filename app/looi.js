@@ -44,6 +44,9 @@ export class Looi extends EventTarget {
     this._drive = { s: 0, t: 0 };
     this._moveTimer = null;
     this._gen = 0;                    // gesture generation — a new command cancels the previous
+    this.hazard = null;               // set by armHazardWatch: null | 'bump' | 'cliff' — the anti-ram reflex
+    this._hazMotion = null;
+    this._hazCliff = null;
   }
 
   _log(msg, cls = '') { this.dispatchEvent(new CustomEvent('log', { detail: { msg, cls } })); }
@@ -269,6 +272,38 @@ export class Looi extends EventTarget {
         this._log('wander: end', 'tx');
       }
     });
+  }
+
+  // ---- Anti-ram reflex: watch the phone IMU (bump) + robot cliff sensors, set this.hazard ----
+  // The depth loop drives in short steps and bails the instant this.hazard fires. This is the
+  // physical backstop for what the camera can't see (a blank wall inches away, a stair edge).
+  armHazardWatch({ bumpAbs = 2.2 } = {}) {
+    this.hazard = null;
+    let avg = null;
+    this._hazMotion = e => {
+      let a = e.acceleration;
+      if (!a || a.x == null) a = e.accelerationIncludingGravity;   // some phones only give gravity-inclusive
+      if (!a || a.x == null) return;
+      const mag = Math.hypot(a.x, a.y, a.z);
+      if (avg == null) avg = mag;
+      const dev = Math.abs(mag - avg);
+      avg = avg * 0.9 + mag * 0.1;                                 // rolling baseline — cancels gravity + steady motion
+      if (dev > bumpAbs) this.hazard = 'bump';                     // a sharp deceleration spike = a collision
+    };
+    this._hazCliff = e => {                                        // FED9 '01 c1 c2 c3 c4': 1=on-surface, 0=drop/edge
+      if (e.detail.key === '01') {
+        const c = e.detail.bytes.slice(1);
+        if (c.length && c.some(b => b === 0)) this.hazard = 'cliff';
+      }
+    };
+    window.addEventListener('devicemotion', this._hazMotion);
+    this.addEventListener('telemetry', this._hazCliff);
+  }
+  disarmHazardWatch() {
+    if (this._hazMotion) window.removeEventListener('devicemotion', this._hazMotion);
+    if (this._hazCliff)  this.removeEventListener('telemetry', this._hazCliff);
+    this._hazMotion = this._hazCliff = null;
+    this.hazard = null;
   }
 
   nod(times = 2) {                                               // "yes" — head up/down

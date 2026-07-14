@@ -81,7 +81,7 @@
   </div>
 
 <script type="module">
-import { Looi }  from './looi.js?v=32';   // bump on every module change — busts Chrome's module cache
+import { Looi }  from './looi.js?v=33';   // bump on every module change — busts Chrome's module cache
 import { Face }  from './face.js?v=32';
 import { Voice } from './voice.js?v=32';
 
@@ -301,11 +301,77 @@ async function wanderVision(maxMs = 120000) {
     }
   } finally { wanderActive = false; looi.drive(0, 0); looi.head(128); releaseCamera(); dlog('wander(vision): end', 'tx'); }
 }
+
+// ---- Depth wander (primary): fast local reflex — perceive (depth) → SHORT watched step → repeat ----
+// Fixes the old ram: instead of one slow look + a 1.3s BLIND lunge, it re-perceives every ~0.5s AND
+// aborts any forward step the instant the IMU-bump/cliff hazard fires. Depth = proactive avoidance;
+// IMU+cliff = the physical backstop for what the camera can't see (a blank wall inches away, a stair edge).
+let STEP_MS = 500;   // forward-step duration = the blind window. shorter = safer/slower. tune on the floor.
+async function wanderDepth(maxMs = 120000) {
+  const base = brainBase();
+  wanderActive = true;
+  dlog('wander(depth): start', 'tx');
+  const t0 = performance.now();
+  const zzz = ms => new Promise(r => setTimeout(r, ms));
+  let turnDir = null, blockedRun = 0;
+  looi.armHazardWatch({ bumpAbs: 2.2 });
+  try {
+    looi.head(82);   // scene across the top, floor below — matches the depth ROI band
+    await zzz(400);
+    while (wanderActive && looi.connected && performance.now() - t0 < maxMs) {
+      let v = null;
+      try {
+        const jpeg = await captureFrame();
+        const r = await fetch(`${base}/depth`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: jpeg }) });
+        if (r.ok) v = await r.json();
+      } catch (e) { dlog('depth: ' + e.message, 'warn'); }
+      if (!wanderActive || !looi.connected) break;
+      const ok = v && !v.error;
+      if (ok) dlog(`depth: ${v.clear ? 'CLEAR' : 'blk→' + v.turn} c=${v.bands ? v.bands.center : '?'} (${v.ms}ms)`, v.clear ? 'ok' : 'warn');
+      else    dlog('depth: ' + ((v && v.error) || 'no reply') + ' → creep', 'warn');
+
+      if (!ok) {                                                  // depth down → creep slowly, reflex still armed
+        await stepForward(450, 50);
+      } else if (v.clear) {                                       // open floor → go (watched step)
+        turnDir = null; blockedRun = 0;
+        await stepForward(STEP_MS + 200, 90);
+      } else if (++blockedRun >= 5) {                             // boxed in → back out and flip around
+        dlog('wander: boxed in → backing out', 'warn');
+        looi.drive(-85, 0); await zzz(800);
+        looi.drive(0, 100);  await zzz(1100);
+        blockedRun = 0; turnDir = null;
+      } else {                                                    // blocked → rotate the SAME way until a clear view
+        if (!turnDir) turnDir = v.turn === 'left' ? -1 : 1;
+        looi.drive(0, turnDir * 95); await zzz(550);
+      }
+      looi.drive(0, 0);
+    }
+  } finally { wanderActive = false; looi.drive(0, 0); looi.head(128); looi.disarmHazardWatch(); releaseCamera(); dlog('wander(depth): end', 'tx'); }
+}
+
+// Drive forward for `ms`, but BAIL the instant a bump/cliff hazard fires (polled every 40ms).
+// A 120ms grace period first swallows the accel spike from the motors starting.
+async function stepForward(ms, spd) {
+  looi.drive(spd, 0);
+  await new Promise(r => setTimeout(r, 120));                     // grace: ignore the start-of-motion spike
+  looi.hazard = null;
+  const end = performance.now() + ms;
+  while (wanderActive && looi.connected && performance.now() < end) {
+    if (looi.hazard) {
+      dlog('reflex: ' + looi.hazard + ' → stop + back', 'warn');
+      looi.drive(-90, 0); await new Promise(r => setTimeout(r, 450));
+      looi.drive(0, (Math.random() < 0.5 ? -1 : 1) * 100); await new Promise(r => setTimeout(r, 600));
+      return;
+    }
+    await new Promise(r => setTimeout(r, 40));
+  }
+}
+
 function stopWander() { wanderActive = false; }
 async function startWander() {
   try { await captureFrame(); }                                  // camera check — prompt fires here on first use
   catch (e) { dlog('camera unavailable (' + e.message + ') → blind wander', 'warn'); looi.wander(); return; }
-  wanderVision();
+  wanderDepth();                                                  // depth reflex is primary; wanderVision() (Gemini) kept as fallback
 }
 
 // ---- Action map: the brain returns an action name, the phone runs the matching gesture ----
