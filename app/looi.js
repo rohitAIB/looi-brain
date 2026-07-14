@@ -174,6 +174,13 @@ export class Looi extends EventTarget {
   drive(speed, turn) { this._drive.s = clamp127(speed); this._drive.t = clamp127(turn); }
   stop() { this._gen++; this.drive(0, 0); }                     // also cancels any running gesture
 
+  // Raw write to a named characteristic (FED0/FED1/FEDA/...) — for protocol probing (e.g. ToF enable).
+  async writeChar(key, arr) {
+    const c = this.chars[CHAR[key]];
+    if (!c) throw new Error('no characteristic ' + key);
+    await c.writeValue(Uint8Array.from(arr));
+  }
+
   async head(angle) {
     const c = this.chars[CHAR.HEAD];
     if (c) { try { await c.writeValue(Uint8Array.of(Math.max(0, Math.min(255, Math.round(angle))))); } catch (e) { this._log('head: ' + e.message, 'warn'); } }

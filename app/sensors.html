@@ -61,6 +61,10 @@
   <button class="drive" id="back">◀ back</button>
   <button id="stop">◼ STOP</button>
 </div>
+<div class="bar">
+  <button class="drive" id="probe">🔎 next FEDA probe</button>
+  <span id="probeval" class="hint">probe: — &nbsp; (tap, then wave hand close & watch for a new FED9 line)</span>
+</div>
 <div id="status">not connected</div>
 <div id="log"></div>
 
@@ -152,6 +156,17 @@ nudge('fwd',  () => looi.forward(1200, 70), 'FWD 1.2s');
 nudge('fwd2', () => looi.forward(2000, 80), 'FWD 2s');
 nudge('back', () => looi.back(800, 80), 'BACK');
 document.getElementById('stop').onclick = () => { try { looi.stop(); } catch {} };
+
+// ---- ToF-enable probe: fire candidate bytes at FEDA (Settings), watch FED9 for a distance packet ----
+const PROBES = [[0x02],[0x04],[0x05],[0x06],[0x07],[0x08],[0x0a],[0x10],[0x11],[0x20],[0x02,0x01],[0x04,0x01],[0x05,0x01],[0xa0],[0xff]];
+let probeIdx = 0;
+document.getElementById('probe').onclick = async () => {
+  const p = PROBES[probeIdx % PROBES.length]; probeIdx++;
+  const hx = p.map(b => b.toString(16).padStart(2, '0')).join(' ');
+  document.getElementById('probeval').textContent = `probe FEDA=[${hx}]  (${((probeIdx - 1) % PROBES.length) + 1}/${PROBES.length}) — now wave hand close`;
+  addLine('divider', `<span class="t">${stamp()}</span> ══ PROBE FEDA=[${hx}] ══`, `\n${stamp()}  ══ PROBE FEDA=[${hx}] ══`, true);
+  try { await looi.writeChar('HAND', p); } catch (e) { sys('probe write err: ' + e.message, 'ch-err'); }
+};
 
 // ---- Auto-stream to the brain-service (reliable local pipe, same endpoint the app uses) ----
 // Reads the brain endpoint the Jarvis app stored (same origin), POSTs sensor lines to /sensors →
