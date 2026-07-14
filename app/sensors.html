@@ -77,6 +77,18 @@ const streamBuf = [];     // ONLY sensor-relevant lines → ntfy (no heartbeats)
 let t0 = performance.now();
 let streaming = false;
 
+// Keep the phone screen awake (screen sleep drops BLE + kills the capture).
+let wakeLock = null;
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    }
+  } catch (e) { /* unsupported or blocked — ignore */ }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
+
 function stamp() { return (performance.now() - t0).toFixed(0).padStart(6) + 'ms'; }
 
 // stream=true → also queued for ntfy. Auto-scroll only if already at bottom.
@@ -120,6 +132,7 @@ looi.addEventListener('battery',      e => sys('battery ' + e.detail.value + '%'
 looi.addEventListener('telemetry',    e => onTelemetry(e.detail.key, e.detail.bytes));
 
 document.getElementById('connect').onclick = async () => {
+  keepAwake();
   statusEl.textContent = 'connecting…';
   try { await looi.connect(); } catch (e) { sys('connect failed: ' + e.message, 'ch-err'); statusEl.textContent = 'connect failed'; }
 };
