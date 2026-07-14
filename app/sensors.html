@@ -153,9 +153,12 @@ nudge('fwd2', () => looi.forward(2000, 80), 'FWD 2s');
 nudge('back', () => looi.back(800, 80), 'BACK');
 document.getElementById('stop').onclick = () => { try { looi.stop(); } catch {} };
 
-// ---- Auto-stream to ntfy: sensor lines only, every 5s, chunked ----
+// ---- Auto-stream to the brain-service (reliable local pipe, same endpoint the app uses) ----
+// Reads the brain endpoint the Jarvis app stored (same origin), POSTs sensor lines to /sensors →
+// server writes them to disk for Claude. Falls back to ntfy only if no brain endpoint is set.
+const BRAIN = (() => { try { const ep = localStorage.getItem('brainEndpoint'); return ep ? new URL(ep).origin : null; } catch { return null; } })();
 const NTFY = 'https://ntfy.sh/looi-dbg-r7k39q2x';
-let sentIdx = 0, seq = 0, flushing = false;
+let sentIdx = 0, seq = 0, flushing = false, didReset = false;
 async function flush(force) {
   if (flushing) return;
   if (!streaming && !force) return;
@@ -165,17 +168,21 @@ async function flush(force) {
   const end = streamBuf.length;
   const body = chunk.join('\n');
   try {
-    for (let i = 0; i < body.length; i += 1500) {
-      seq++;
-      await fetch(NTFY, { method: 'POST', headers: { Title: `looi-sensors #${seq}` }, body: body.slice(i, i + 1500) });
-      await new Promise(r => setTimeout(r, 300));
+    if (BRAIN) {
+      const q = didReset ? '' : '?reset=1'; didReset = true;      // first flush truncates the log
+      const r = await fetch(BRAIN + '/sensors' + q, { method: 'POST', body });
+      if (!r.ok) throw new Error('brain ' + r.status);
+      sentIdx = end;
+      statusEl.textContent = `✅ ${end} line(s) → brain`;
+    } else {
+      for (let i = 0; i < body.length; i += 1500) { seq++; await fetch(NTFY, { method: 'POST', headers: { Title: `looi-sensors #${seq}` }, body: body.slice(i, i + 1500) }); await new Promise(r => setTimeout(r, 300)); }
+      sentIdx = end;
+      statusEl.textContent = `📡 ${end} line(s) → ntfy (no brain endpoint set)`;
     }
-    sentIdx = end;
-    statusEl.textContent = `📡 streamed ${end} sensor line(s)`;
   } catch (e) { statusEl.textContent = 'stream err: ' + e.message; }
   finally { flushing = false; }
 }
-setInterval(() => flush(false), 5000);
+setInterval(() => flush(false), 4000);
 document.getElementById('flush').onclick = () => flush(true);
 
 sys('ready. Tap Connect.');
