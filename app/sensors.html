@@ -156,7 +156,10 @@ document.getElementById('stop').onclick = () => { try { looi.stop(); } catch {} 
 // ---- Auto-stream to the brain-service (reliable local pipe, same endpoint the app uses) ----
 // Reads the brain endpoint the Jarvis app stored (same origin), POSTs sensor lines to /sensors →
 // server writes them to disk for Claude. Falls back to ntfy only if no brain endpoint is set.
-const BRAIN = (() => { try { const ep = localStorage.getItem('brainEndpoint'); return ep ? new URL(ep).origin : null; } catch { return null; } })();
+const BRAIN = (() => {
+  try { const ep = localStorage.getItem('brainEndpoint'); if (ep) return new URL(ep).origin; } catch {}
+  return 'https://laptop-t1irqf8l.tail001138.ts.net';     // brain-service (works when phone is on Tailscale, same as Jarvis)
+})();
 const NTFY = 'https://ntfy.sh/looi-dbg-r7k39q2x';
 let sentIdx = 0, seq = 0, flushing = false, didReset = false;
 async function flush(force) {
