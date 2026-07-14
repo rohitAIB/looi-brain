@@ -116,7 +116,7 @@ setInterval(() => {                                             // flush batched
   const body = _logBuf.join('\n'); _logBuf = [];
   fetch(`https://ntfy.sh/${DEBUG_TOPIC}`, { method: 'POST', body, headers: { Priority: 'min', Title: `looi ${SESSION}`, Tags: 'robot' } }).catch(() => {});
 }, 1500);
-dlog(`session ${SESSION} start · app v33 · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
+dlog(`session ${SESSION} start · app v34 · ${navigator.userAgent.replace(/^.*(Android[^;)]*).*$/, '$1') || 'device'}`);
 $('status').onclick = () => $('dbg').classList.toggle('show');
 looi.addEventListener('log', e => dlog('ble: ' + e.detail.msg, e.detail.cls));
 
@@ -314,7 +314,7 @@ async function wanderDepth(maxMs = 120000) {
   const t0 = performance.now();
   const zzz = ms => new Promise(r => setTimeout(r, ms));
   let turnDir = null, blockedRun = 0;
-  looi.armHazardWatch({ bumpAbs: 2.2 });
+  looi.armHazardWatch({ bumpAbs: 3.2 });   // higher = fewer false retreats; depth+low-texture is the proactive layer now
   try {
     looi.head(82);   // scene across the top, floor below — matches the depth ROI band
     await zzz(400);
@@ -353,7 +353,7 @@ async function wanderDepth(maxMs = 120000) {
 // A 120ms grace period first swallows the accel spike from the motors starting.
 async function stepForward(ms, spd) {
   looi.drive(spd, 0);
-  await new Promise(r => setTimeout(r, 120));                     // grace: ignore the start-of-motion spike
+  await new Promise(r => setTimeout(r, 200));                     // grace: ignore the start-of-motion spike
   looi.hazard = null;
   const end = performance.now() + ms;
   while (wanderActive && looi.connected && performance.now() < end) {
