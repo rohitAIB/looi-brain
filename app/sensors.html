@@ -56,8 +56,9 @@
   <button id="clear">Clear</button>
 </div>
 <div class="bar">
-  <button class="drive" id="fwd">▲ HOLD: drive forward</button>
-  <button class="drive" id="fwdslow">△ HOLD: creep</button>
+  <button class="drive" id="fwd">▶ nudge fwd 1s</button>
+  <button class="drive" id="fwd2">▶▶ fwd 2s</button>
+  <button class="drive" id="back">◀ back</button>
   <button id="stop">◼ STOP</button>
 </div>
 <div id="status">not connected</div>
@@ -127,16 +128,17 @@ document.getElementById('disconnect').onclick = () => looi.disconnect();
 document.querySelectorAll('button.mark').forEach(b =>
   b.onclick = () => addLine('divider', `<span class="t">${stamp()}</span> ── ${b.dataset.mark} ──`, `\n${stamp()}  ── ${b.dataset.mark} ──`, true));
 
-// ---- Drive controls (to wake a motion-gated ToF sensor) ----
-function driveHold(btn, speed, label) {
-  const start = () => { try { looi.drive(speed, 0); } catch {} addLine('divider', `<span class="t">${stamp()}</span> ── DRIVE ${label} ──`, `\n${stamp()}  ── DRIVE ${label} ──`, true); };
-  const stop  = () => { try { looi.drive(0, 0); } catch {} };
-  btn.addEventListener('pointerdown', e => { e.preventDefault(); start(); });
-  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => btn.addEventListener(ev, stop));
+// ---- Drive controls: tap to nudge (uses the proven gesture methods, auto-stops) ----
+function nudge(id, fn, label) {
+  document.getElementById(id).onclick = () => {
+    addLine('divider', `<span class="t">${stamp()}</span> ── DRIVE ${label} ──`, `\n${stamp()}  ── DRIVE ${label} ──`, true);
+    try { fn(); } catch (e) { sys('drive err: ' + e.message, 'ch-err'); }
+  };
 }
-driveHold(document.getElementById('fwd'), 80, 'FWD');
-driveHold(document.getElementById('fwdslow'), 45, 'CREEP');
-document.getElementById('stop').onclick = () => { try { looi.drive(0, 0); } catch {} };
+nudge('fwd',  () => looi.forward(1200, 70), 'FWD 1.2s');
+nudge('fwd2', () => looi.forward(2000, 80), 'FWD 2s');
+nudge('back', () => looi.back(800, 80), 'BACK');
+document.getElementById('stop').onclick = () => { try { looi.stop(); } catch {} };
 
 // ---- Auto-stream to ntfy: sensor lines only, every 5s, chunked ----
 const NTFY = 'https://ntfy.sh/looi-dbg-r7k39q2x';
