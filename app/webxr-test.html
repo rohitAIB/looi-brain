@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>LOOI · WebXR VIO spike</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; font-family: system-ui, sans-serif; }
+  html, body { height: 100%; margin: 0; background: #0d1117; color: #e6edf3; }
+  body { display: flex; flex-direction: column; }
+  header { padding: 8px 12px; background: #161b22; border-bottom: 1px solid #30363d; font-size: 13px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; }
+  button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px;
+           padding: 10px 12px; font-size: 13px; font-weight: 600; touch-action: manipulation; }
+  button:active { background: #30363d; }
+  button.primary { background: #238636; border-color: #2ea043; }
+  button.drive  { background: #1d3a5f; border-color: #2b5c93; }
+  button#stop   { background: #5a1e1e; border-color: #8a2a2a; }
+  #pose { font-family: ui-monospace, Consolas, monospace; font-size: 15px; padding: 10px 12px;
+          background: #0b2b1a; border: 1px solid #1a5c37; border-radius: 8px; margin: 0 12px; white-space: pre; }
+  #log { flex: 1 1 auto; overflow-y: auto; padding: 8px 12px 24px; font-family: ui-monospace, Consolas, monospace;
+         font-size: 12px; white-space: pre-wrap; color: #8b949e; }
+  .ok { color: #7ee787; } .warn { color: #f0a020; } .err { color: #f85149; }
+  /* DOM overlay shown during the immersive AR session */
+  #overlay { position: fixed; inset: 0; display: none; flex-direction: column; justify-content: space-between;
+             pointer-events: none; padding: 12px; }
+  #overlay.on { display: flex; }
+  #overlay > * { pointer-events: auto; }
+  #xrpose { font-family: ui-monospace, Consolas, monospace; font-size: 16px; background: rgba(0,0,0,.55);
+            padding: 10px; border-radius: 8px; white-space: pre; }
+  #xrdrive { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #xrdrive button { padding: 16px 8px; font-size: 16px; }
+</style>
+</head>
+<body>
+<header><b>LOOI · WebXR VIO spike</b> — can the phone track its own position while mounted on LOOI?</header>
+
+<div class="bar">
+  <button id="connect" class="primary">1 · Connect body</button>
+  <button id="check">2 · Check WebXR</button>
+  <button id="start" class="primary">3 · Start AR tracking</button>
+</div>
+<div id="pose">pose: (not tracking)</div>
+<div class="bar">
+  <span style="font-size:12px;color:#8b949e">Once in AR: drive with the on-screen pad, watch x/z change. Drive a known ~1m and check the number.</span>
+</div>
+<div id="log"></div>
+
+<!-- Overlay that stays interactive DURING the immersive AR session -->
+<div id="overlay">
+  <div id="xrpose">starting…</div>
+  <div id="xrdrive">
+    <button></button><button class="drive" data-d="fwd">▲ fwd</button><button></button>
+    <button class="drive" data-d="left">◀ left</button><button id="stop" data-d="stop">◼ stop</button><button class="drive" data-d="right">right ▶</button>
+    <button></button><button class="drive" data-d="back">▼ back</button><button id="endar" style="background:#3d2a5f;border-color:#5c3b93">✕ end AR</button>
+  </div>
+</div>
+
+<script type="module">
+import { Looi } from './looi.js?v=33';
+
+const looi = new Looi();
+const logEl = document.getElementById('log');
+const poseEl = document.getElementById('pose');
+const xrposeEl = document.getElementById('xrpose');
+const overlay = document.getElementById('overlay');
+
+function log(m, cls = '') {
+  const t = (performance.now() / 1000).toFixed(1);
+  logEl.insertAdjacentHTML('beforeend', `<div class="${cls}">${t}s  ${m}</div>`);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---- Stream pose samples to the brain (same pipe sensors.html uses) so Claude can analyze the trajectory ----
+const BRAIN = (() => { try { const ep = localStorage.getItem('brainEndpoint'); if (ep) return new URL(ep).origin; } catch {} return 'https://laptop-t1irqf8l.tail001138.ts.net'; })();
+let streamBuf = [], sentIdx = 0, didReset = false, flushing = false;
+async function flush() {
+  if (flushing) return; const chunk = streamBuf.slice(sentIdx); if (!chunk.length) return;
+  flushing = true; const end = streamBuf.length;
+  try {
+    const q = didReset ? '' : '?reset=1'; didReset = true;
+    const r = await fetch(BRAIN + '/sensors' + q, { method: 'POST', body: chunk.join('\n') });
+    if (r.ok) sentIdx = end;
+  } catch {} finally { flushing = false; }
+}
+setInterval(flush, 3000);
+const stream = line => streamBuf.push(line);
+
+// ---- BLE connect + drive ----
+looi.addEventListener('log', e => log(e.detail.msg, e.detail.cls === 'err' ? 'err' : ''));
+document.getElementById('connect').onclick = async () => { try { await looi.connect(); log('body connected', 'ok'); } catch (e) { log('connect failed: ' + e.message, 'err'); } };
+
+const DRIVE = {
+  fwd:  () => looi.drive(80, 0), back: () => looi.drive(-80, 0),
+  left: () => looi.drive(0, -90), right: () => looi.drive(0, 90), stop: () => looi.stop(),
+};
+function wireDrive(el) {
+  el.querySelectorAll('[data-d]').forEach(b => {
+    const fn = DRIVE[b.dataset.d]; if (!fn) return;
+    b.addEventListener('pointerdown', e => { e.preventDefault(); fn(); });
+    if (b.dataset.d !== 'stop') b.addEventListener('pointerup', () => looi.stop());
+  });
+}
+wireDrive(overlay);
+
+// ---- WebXR support check ----
+document.getElementById('check').onclick = async () => {
+  if (!('xr' in navigator)) { log('navigator.xr MISSING — WebXR not available in this browser', 'err'); return; }
+  try {
+    const ar = await navigator.xr.isSessionSupported('immersive-ar');
+    log('immersive-ar supported: ' + ar, ar ? 'ok' : 'err');
+    if (!ar) log('→ install/update "Google Play Services for AR" (ARCore), use Chrome', 'warn');
+  } catch (e) { log('support check error: ' + e.message, 'err'); }
+};
+
+// ---- Start AR tracking ----
+let xrSession = null, xrRefSpace = null, lost = false, t0 = 0, samples = 0;
+function yaw(q) { return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x)) * 180 / Math.PI; }
+
+document.getElementById('start').onclick = async () => {
+  if (!('xr' in navigator)) { log('no WebXR', 'err'); return; }
+  const canvas = document.createElement('canvas');
+  const gl = canvas.getContext('webgl', { xrCompatible: true });
+  try {
+    xrSession = await navigator.xr.requestSession('immersive-ar', {
+      optionalFeatures: ['local-floor', 'dom-overlay'],
+      domOverlay: { root: overlay },
+    });
+  } catch (e) { log('requestSession failed: ' + e.message, 'err'); return; }
+  overlay.classList.add('on');
+  await gl.makeXRCompatible();
+  xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
+  try { xrRefSpace = await xrSession.requestReferenceSpace('local-floor'); log('ref space: local-floor', 'ok'); }
+  catch { xrRefSpace = await xrSession.requestReferenceSpace('local'); log('ref space: local (no floor)', 'warn'); }
+  xrSession.addEventListener('end', () => { overlay.classList.remove('on'); xrSession = null; log(`AR ended (${samples} pose samples)`, 'warn'); stream(`xr END samples=${samples}`); flush(); });
+  t0 = performance.now(); samples = 0; stream('xr START ' + new Date().toISOString());
+  log('AR session started — drive LOOI and watch the pose', 'ok');
+  xrSession.requestAnimationFrame(onFrame);
+};
+document.getElementById('endar').onclick = () => xrSession && xrSession.end();
+
+let lastStream = 0;
+function onFrame(t, frame) {
+  const s = frame.session; s.requestAnimationFrame(onFrame);
+  const pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) { if (!lost) { lost = true; log('TRACKING LOST', 'err'); stream('xr LOST t=' + ((performance.now() - t0) / 1000).toFixed(1)); } xrposeEl.textContent = '⚠ tracking lost'; return; }
+  if (lost) { lost = false; log('tracking recovered', 'ok'); stream('xr RECOVER'); }
+  samples++;
+  const p = pose.transform.position, o = pose.transform.orientation;
+  const dist = Math.hypot(p.x, p.z);                              // horizontal distance from start
+  const txt = `x ${p.x.toFixed(2)}  y ${p.y.toFixed(2)}  z ${p.z.toFixed(2)}\nyaw ${yaw(o).toFixed(0)}°   |start| ${dist.toFixed(2)} m`;
+  xrposeEl.textContent = txt; poseEl.textContent = 'pose:\n' + txt;
+  const now = performance.now();
+  if (now - lastStream > 300) { lastStream = now; stream(`xr t=${((now - t0) / 1000).toFixed(1)} x=${p.x.toFixed(3)} y=${p.y.toFixed(3)} z=${p.z.toFixed(3)} yaw=${yaw(o).toFixed(1)} d=${dist.toFixed(3)}`); }
+}
+
+log('ready. 1) Connect body  2) Check WebXR  3) Start AR tracking. (Chrome + ARCore + Tailscale on.)');
+</script>
+</body>
+</html>
