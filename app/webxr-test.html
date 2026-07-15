@@ -127,10 +127,11 @@ document.getElementById('check').onclick = async () => {
 // ---- Start AR tracking ----
 let xrSession = null, xrRefSpace = null, lost = false, t0 = 0, samples = 0;
 let cur = { x: 0, z: 0, yaw: 0, ok: false };                  // latest VIO pose (updated every frame)
-let obstacleAhead = null, depthEnabled = false, depthErr = false;   // depth ahead (m) from the AR camera — paired avoidance
+let obstacleAhead = null, obstacleT = 0, depthEnabled = false, depthErr = false;   // depth ahead (m) from the AR camera
 let lastSx = 0, lastSz = 0, lastSyaw = 0;                     // last-streamed pose, for change-based logging
 function yaw(q) { return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x)) * 180 / Math.PI; }
 const norm2 = a => { while (a > 180) a -= 360; while (a < -180) a += 360; return a; };   // wrap degrees
+const obAhead = () => (obstacleAhead != null && performance.now() - obstacleT < 600) ? obstacleAhead : null;   // fresh depth only — no stale
 
 document.getElementById('start').onclick = async () => {
   if (!('xr' in navigator)) { log('no WebXR', 'err'); return; }
@@ -180,11 +181,12 @@ function onFrame(t, frame) {
           if (m > 0.05 && m < mn) mn = m;                       // nearest thing in the central patch
         }
         obstacleAhead = isFinite(mn) ? mn : null;
+        if (obstacleAhead != null) obstacleT = performance.now();   // timestamp for freshness
       }
     } catch (e) { if (!depthErr) { depthErr = true; log('depth read err: ' + e.message, 'warn'); } }
   }
   const dist = Math.hypot(p.x, p.z);
-  const oa = obstacleAhead != null ? obstacleAhead.toFixed(2) + 'm' : '—';
+  const oa = obAhead() != null ? obAhead().toFixed(2) + 'm' : '—';
   const txt = `x ${p.x.toFixed(2)}  z ${p.z.toFixed(2)}  yaw ${yaw(o).toFixed(0)}°\n|start| ${dist.toFixed(2)}m   ahead ${oa}`;
   xrposeEl.textContent = txt; poseEl.textContent = 'pose:\n' + txt;
   // change-based logging: only when LOOI actually moved/turned (kills the idle-frame spam)
@@ -227,7 +229,7 @@ async function roam() {
       let hit = false;
       while (roaming && performance.now() < legEnd) {
         if (looi.hazard) { hit = 'cliff'; break; }
-        if (depthEnabled && obstacleAhead != null && obstacleAhead < STOP_M) { hit = 'depth ' + obstacleAhead.toFixed(2) + 'm'; break; }
+        const oa = obAhead(); if (oa != null && oa < STOP_M) { hit = 'depth ' + oa.toFixed(2) + 'm'; break; }
         await zzz(60);
       }
       looi.stop(); if (!roaming) break;
@@ -247,7 +249,7 @@ async function driveSeg(ms, spd = 85) {
   const end = performance.now() + ms; let blocked = false;
   while (performance.now() < end) {
     if (looi.hazard) { blocked = 'cliff'; stream('nav HAZ ' + looi.hazard); break; }
-    if (depthEnabled && obstacleAhead != null && obstacleAhead < STOP_M) { blocked = 'depth'; stream('nav DEPTH-STOP ' + obstacleAhead.toFixed(2)); break; }
+    const oa = obAhead(); if (oa != null && oa < STOP_M) { blocked = 'depth'; stream('nav DEPTH-STOP ' + oa.toFixed(2)); break; }
     await zzz(40);
   }
   looi.stop(); await zzz(350);                                // settle + let pose catch up
@@ -264,8 +266,15 @@ async function goBack() {
   setNav('calibrating…'); stream('nav GOBACK');
   try {
     // calibrate the yaw→heading map from two clean forward legs around a turn (yaw is stable; motion is not)
-    const s1 = await driveSeg(1100); if (!navigating) return;
-    if (s1.travel == null) { setNav('no clean motion — tilt camera to the room & retry'); stream('nav ABORT no-motion m=' + s1.moved.toFixed(2)); return; }
+    let s1 = null;
+    for (let tries = 0; tries < 3 && navigating; tries++) {     // obstructed direction → turn and retry, don't just abort
+      s1 = await driveSeg(1100);
+      if (s1.travel != null) break;
+      stream('nav CAL retry moved=' + s1.moved.toFixed(2) + (s1.blocked ? ' blk:' + s1.blocked : ''));
+      await turnCmd(1, 650);
+    }
+    if (!navigating) return;
+    if (!s1 || s1.travel == null) { setNav('can\'t get a clean move — obstructed?'); stream('nav ABORT no-motion'); return; }
     await turnCmd(1, 550); if (!navigating) return;
     const s2 = await driveSeg(1100); if (!navigating) return;
     let k = 1, turnDirSign = 1;
