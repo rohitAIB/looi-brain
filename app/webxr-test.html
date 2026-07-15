@@ -50,10 +50,20 @@
 <!-- Overlay that stays interactive DURING the immersive AR session -->
 <div id="overlay">
   <div id="xrpose">starting…</div>
-  <div id="xrdrive">
-    <button></button><button class="drive" data-d="fwd">▲ fwd</button><button></button>
-    <button class="drive" data-d="left">◀ left</button><button id="stop" data-d="stop">◼ stop</button><button class="drive" data-d="right">right ▶</button>
-    <button></button><button class="drive" data-d="back">▼ back</button><button id="endar" style="background:#3d2a5f;border-color:#5c3b93">✕ end AR</button>
+  <div>
+    <div id="navstat" style="font-family:ui-monospace,monospace;font-size:14px;background:rgba(0,0,0,.6);padding:9px;border-radius:8px;margin-bottom:8px">nav: idle</div>
+    <div id="xrnav" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+      <button id="savespot" style="flex:1 1 45%;background:#1f4d2e;border-color:#2ea043">◎ save spot</button>
+      <button id="roam" style="flex:1 1 45%;background:#2d2a5f;border-color:#5b53c9">🎲 roam</button>
+      <button id="gospot" style="flex:1 1 45%;background:#1d3a5f;border-color:#2b5c93">➤ go back</button>
+      <button id="stopnav" style="flex:1 1 45%;background:#5a1e1e;border-color:#8a2a2a">◼ stop</button>
+      <button id="voicebtn" style="flex:1 1 100%;background:#3d2a5f;border-color:#5c3b93">🎤 voice (say: roam / go back / stop)</button>
+    </div>
+    <div id="xrdrive">
+      <button></button><button class="drive" data-d="fwd">▲ fwd</button><button></button>
+      <button class="drive" data-d="left">◀ left</button><button id="stop" data-d="stop">◼ stop</button><button class="drive" data-d="right">right ▶</button>
+      <button></button><button class="drive" data-d="back">▼ back</button><button id="endar" style="background:#3d2a5f;border-color:#5c3b93">✕ end AR</button>
+    </div>
   </div>
 </div>
 
@@ -116,6 +126,7 @@ document.getElementById('check').onclick = async () => {
 
 // ---- Start AR tracking ----
 let xrSession = null, xrRefSpace = null, lost = false, t0 = 0, samples = 0;
+let cur = { x: 0, z: 0, yaw: 0, ok: false };                  // latest VIO pose (updated every frame)
 function yaw(q) { return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x)) * 180 / Math.PI; }
 
 document.getElementById('start').onclick = async () => {
@@ -144,10 +155,11 @@ let lastStream = 0;
 function onFrame(t, frame) {
   const s = frame.session; s.requestAnimationFrame(onFrame);
   const pose = frame.getViewerPose(xrRefSpace);
-  if (!pose) { if (!lost) { lost = true; log('TRACKING LOST', 'err'); stream('xr LOST t=' + ((performance.now() - t0) / 1000).toFixed(1)); } xrposeEl.textContent = '⚠ tracking lost'; return; }
+  if (!pose) { if (!lost) { lost = true; log('TRACKING LOST', 'err'); stream('xr LOST t=' + ((performance.now() - t0) / 1000).toFixed(1)); } cur.ok = false; xrposeEl.textContent = '⚠ tracking lost'; return; }
   if (lost) { lost = false; log('tracking recovered', 'ok'); stream('xr RECOVER'); }
   samples++;
   const p = pose.transform.position, o = pose.transform.orientation;
+  cur = { x: p.x, z: p.z, yaw: yaw(o), ok: true };            // live pose for the nav controller
   const dist = Math.hypot(p.x, p.z);                              // horizontal distance from start
   const txt = `x ${p.x.toFixed(2)}  y ${p.y.toFixed(2)}  z ${p.z.toFixed(2)}\nyaw ${yaw(o).toFixed(0)}°   |start| ${dist.toFixed(2)} m`;
   xrposeEl.textContent = txt; poseEl.textContent = 'pose:\n' + txt;
@@ -155,7 +167,113 @@ function onFrame(t, frame) {
   if (now - lastStream > 300) { lastStream = now; stream(`xr t=${((now - t0) / 1000).toFixed(1)} x=${p.x.toFixed(3)} y=${p.y.toFixed(3)} z=${p.z.toFixed(3)} yaw=${yaw(o).toFixed(1)} d=${dist.toFixed(3)}`); }
 }
 
-log('ready. 1) Connect body  2) Check WebXR  3) Start AR tracking. (Chrome + ARCore + Tailscale on.)');
+// ================= Autonomous roam + return-to-spot (VIO closed-loop) =================
+let target = null, navigating = false, roaming = false;
+const navstat = document.getElementById('navstat');
+const setNav = m => { navstat.textContent = 'nav: ' + m; };
+const zzz = ms => new Promise(r => setTimeout(r, ms));
+const norm = a => { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; };
+const distTo = t => Math.hypot(t.x - cur.x, t.z - cur.z);
+const DEG = 180 / Math.PI;
+
+document.getElementById('savespot').onclick = () => {
+  if (!cur.ok) { setNav('can\'t save — no tracking'); return; }
+  target = { x: cur.x, z: cur.z };
+  setNav(`spot saved (${target.x.toFixed(2)}, ${target.z.toFixed(2)})`);
+  stream(`nav SAVE x=${target.x.toFixed(3)} z=${target.z.toFixed(3)}`);
+};
+document.getElementById('stopnav').onclick = () => { roaming = navigating = false; looi.stop(); looi.disarmHazardWatch(); setNav('stopped'); stream('nav STOP'); };
+
+// ---- Autonomous roam: smooth continuous legs, back off on physical bump/cliff (no jerky tapping) ----
+async function roam() {
+  if (roaming || navigating) return;
+  if (!looi.connected) { setNav('connect body first'); return; }
+  roaming = true; looi.disarmHazardWatch(); looi.armHazardWatch({ bumpAbs: 3.0 });
+  setNav('roaming…'); stream('nav ROAM start');
+  try {
+    while (roaming && looi.connected) {
+      looi.hazard = null; looi.drive(85, 0);                  // smooth forward leg
+      const legEnd = performance.now() + 1500 + Math.random() * 2000;
+      let hit = false;
+      while (roaming && performance.now() < legEnd) { if (looi.hazard) { hit = true; break; } await zzz(60); }
+      looi.stop(); if (!roaming) break;
+      if (hit) { stream('nav ROAM ' + looi.hazard); looi.drive(-85, 0); await zzz(600); looi.stop(); }
+      const dir = Math.random() < 0.5 ? -1 : 1;               // explore a new heading
+      looi.drive(0, dir * 95); await zzz(hit ? 700 + Math.random() * 700 : 300 + Math.random() * 500);
+      looi.stop(); await zzz(150);
+    }
+  } finally { roaming = false; looi.stop(); if (!navigating) looi.disarmHazardWatch(); setNav('roam stopped'); }
+}
+
+// ---- Return to the saved spot: self-calibrating (measures heading from real motion) ----
+async function nudgeForward(ms = 550, spd = 82) {
+  const a = { x: cur.x, z: cur.z };
+  looi.hazard = null; looi.drive(spd, 0);
+  const end = performance.now() + ms; let hit = false;
+  while (performance.now() < end) { if (looi.hazard) { hit = true; break; } await zzz(40); }
+  looi.stop(); await zzz(300);                                // settle + let the pose catch up
+  const dx = cur.x - a.x, dz = cur.z - a.z, moved = Math.hypot(dx, dz);
+  return { moved, heading: moved > 0.03 ? Math.atan2(dx, dz) : null, hit };
+}
+const turnCmd = async (dir, ms) => { looi.drive(0, dir * 90); await zzz(ms); looi.stop(); await zzz(300); };
+
+async function goBack() {
+  if (!target) { setNav('no spot saved yet'); return; }
+  roaming = false; await zzz(200);
+  if (!cur.ok) { setNav('no tracking'); return; }
+  navigating = true; looi.disarmHazardWatch(); looi.armHazardWatch({ bumpAbs: 3.2 });
+  setNav('calibrating…'); stream('nav GOBACK');
+  try {
+    const c1 = await nudgeForward(650); if (!navigating) return;
+    if (c1.heading == null) { setNav('can\'t move/track — aborting'); stream('nav ABORT no-motion'); return; }
+    await turnCmd(1, 500); if (!navigating) return;
+    const c2 = await nudgeForward(650); if (!navigating) return;
+    let heading = c2.heading != null ? c2.heading : c1.heading;
+    const turnDirSign = (c2.heading != null && Math.sign(norm(c2.heading - c1.heading))) || 1;   // +cmd rotates heading which way
+    stream(`nav CAL turnDirSign=${turnDirSign} h1=${(c1.heading * DEG).toFixed(0)} h2=${c2.heading != null ? (c2.heading * DEG).toFixed(0) : 'na'}`);
+
+    let guard = 0;
+    while (navigating && guard++ < 45) {
+      const d = distTo(target);
+      setNav(`${d.toFixed(2)} m to spot`);
+      stream(`nav STEP d=${d.toFixed(3)} pos=${cur.x.toFixed(2)},${cur.z.toFixed(2)} head=${(heading * DEG).toFixed(0)}`);
+      if (d < 0.25) { setNav(`✔ ARRIVED (${d.toFixed(2)} m off)`); stream('nav ARRIVED d=' + d.toFixed(3)); break; }
+      const bearing = Math.atan2(target.x - cur.x, target.z - cur.z);
+      const err = norm(bearing - heading);
+      if (Math.abs(err) > 25 / DEG) {                          // reorient toward the spot
+        await turnCmd(Math.sign(err) * turnDirSign, Math.min(1100, Math.max(250, Math.abs(err) / Math.PI * 1300)));
+        heading = norm(heading + err);                         // approx; the next nudge re-measures it truthfully
+      } else {                                                 // roughly aimed → drive, and re-measure heading from motion
+        const f = await nudgeForward(550);
+        if (f.heading != null) heading = f.heading;
+        else { stream('nav no-move → nudge-turn'); await turnCmd(turnDirSign, 450); }   // stalled → rotate to recover
+      }
+    }
+    if (guard >= 45) { setNav('gave up after 45 steps'); stream('nav GIVEUP'); }
+  } finally { navigating = false; looi.stop(); looi.disarmHazardWatch(); }
+}
+document.getElementById('roam').onclick = roam;
+document.getElementById('gospot').onclick = goBack;
+
+// ---- Voice: "roam" / "go back" / "stop" ----
+document.getElementById('voicebtn').onclick = () => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { setNav('no speech recognition'); return; }
+  const r = new SR(); r.lang = 'en-US'; r.interimResults = false; r.maxAlternatives = 1;
+  setNav('🎤 listening…');
+  r.onresult = e => {
+    const said = (e.results[0][0].transcript || '').toLowerCase();
+    log('heard: "' + said + '"', 'ok'); stream('nav VOICE "' + said + '"');
+    if (/back|return|home|come/.test(said)) goBack();
+    else if (/roam|wander|explore|random|go/.test(said)) roam();
+    else if (/stop|halt|freeze/.test(said)) { roaming = navigating = false; looi.stop(); setNav('stopped'); }
+    else setNav('didn\'t catch a command in: "' + said + '"');
+  };
+  r.onerror = e => setNav('voice error: ' + e.error);
+  r.start();
+};
+
+log('ready. 1) Connect body  2) Check WebXR  3) Start AR tracking. Then: save spot → roam → go back. (Chrome + ARCore + Tailscale on.)');
 </script>
 </body>
 </html>
