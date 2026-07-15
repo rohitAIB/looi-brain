@@ -366,6 +366,7 @@ async function execCmd(cmd) {
   else if (a === 'left') { looi.drive(0, -spd - 10); await zzz(ms); looi.stop(); }
   else if (a === 'right') { looi.drive(0, spd + 10); await zzz(ms); looi.stop(); }
   else if (a === 'stop') { looi.stop(); }
+  else if (a === 'head') { try { looi.head(cmd.angle != null ? cmd.angle : 110); } catch (e) {} }   // tilt to aim the rear camera (Claude tunes this)
   // 'capture' / anything else → just observe
   await zzz(350);                                              // settle + let pose/depth update, then grab an observation
   capReq = { label: 'after:' + a + '/' + ms };                // onFrame grabs image+depth+pose → posts to /obs
