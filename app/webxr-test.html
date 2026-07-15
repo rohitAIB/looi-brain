@@ -127,7 +127,10 @@ document.getElementById('check').onclick = async () => {
 // ---- Start AR tracking ----
 let xrSession = null, xrRefSpace = null, lost = false, t0 = 0, samples = 0;
 let cur = { x: 0, z: 0, yaw: 0, ok: false };                  // latest VIO pose (updated every frame)
+let obstacleAhead = null, depthEnabled = false, depthErr = false;   // depth ahead (m) from the AR camera — paired avoidance
+let lastSx = 0, lastSz = 0, lastSyaw = 0;                     // last-streamed pose, for change-based logging
 function yaw(q) { return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x)) * 180 / Math.PI; }
+const norm2 = a => { while (a > 180) a -= 360; while (a < -180) a += 360; return a; };   // wrap degrees
 
 document.getElementById('start').onclick = async () => {
   if (!('xr' in navigator)) { log('no WebXR', 'err'); return; }
@@ -135,10 +138,16 @@ document.getElementById('start').onclick = async () => {
   const gl = canvas.getContext('webgl', { xrCompatible: true });
   try {
     xrSession = await navigator.xr.requestSession('immersive-ar', {
-      optionalFeatures: ['local-floor', 'dom-overlay'],
+      optionalFeatures: ['local-floor', 'dom-overlay', 'depth-sensing', 'camera-access'],
       domOverlay: { root: overlay },
+      depthSensing: { usagePreference: ['cpu-optimized'], dataFormatPreference: ['luminance-alpha', 'float32'] },
     });
   } catch (e) { log('requestSession failed: ' + e.message, 'err'); return; }
+  const feats = Array.from(xrSession.enabledFeatures || []);
+  depthEnabled = feats.includes('depth-sensing');
+  log('AR features: ' + (feats.join(', ') || '(none listed)'), 'ok');
+  log(depthEnabled ? 'depth-sensing: YES ✓ — paired avoidance ACTIVE' : 'depth-sensing: NO — nav only (blind ahead)', depthEnabled ? 'ok' : 'warn');
+  stream('xr FEATURES ' + feats.join('|') + ' depth=' + depthEnabled);
   overlay.classList.add('on');
   await gl.makeXRCompatible();
   xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
@@ -160,15 +169,36 @@ function onFrame(t, frame) {
   samples++;
   const p = pose.transform.position, o = pose.transform.orientation;
   cur = { x: p.x, z: p.z, yaw: yaw(o), ok: true };            // live pose for the nav controller
-  const dist = Math.hypot(p.x, p.z);                              // horizontal distance from start
-  const txt = `x ${p.x.toFixed(2)}  y ${p.y.toFixed(2)}  z ${p.z.toFixed(2)}\nyaw ${yaw(o).toFixed(0)}°   |start| ${dist.toFixed(2)} m`;
+  // --- depth ahead (rear camera faces the travel direction when driving rear-first) ---
+  if (depthEnabled) {
+    try {
+      const di = frame.getDepthInformation(pose.views[0]);
+      if (di) {
+        let mn = Infinity;
+        for (let vx = 0.35; vx <= 0.65; vx += 0.15) for (let vy = 0.45; vy <= 0.75; vy += 0.15) {
+          const m = di.getDepthInMeters(vx, vy);
+          if (m > 0.05 && m < mn) mn = m;                       // nearest thing in the central patch
+        }
+        obstacleAhead = isFinite(mn) ? mn : null;
+      }
+    } catch (e) { if (!depthErr) { depthErr = true; log('depth read err: ' + e.message, 'warn'); } }
+  }
+  const dist = Math.hypot(p.x, p.z);
+  const oa = obstacleAhead != null ? obstacleAhead.toFixed(2) + 'm' : '—';
+  const txt = `x ${p.x.toFixed(2)}  z ${p.z.toFixed(2)}  yaw ${yaw(o).toFixed(0)}°\n|start| ${dist.toFixed(2)}m   ahead ${oa}`;
   xrposeEl.textContent = txt; poseEl.textContent = 'pose:\n' + txt;
+  // change-based logging: only when LOOI actually moved/turned (kills the idle-frame spam)
   const now = performance.now();
-  if (now - lastStream > 300) { lastStream = now; stream(`xr t=${((now - t0) / 1000).toFixed(1)} x=${p.x.toFixed(3)} y=${p.y.toFixed(3)} z=${p.z.toFixed(3)} yaw=${yaw(o).toFixed(1)} d=${dist.toFixed(3)}`); }
+  if ((Math.hypot(p.x - lastSx, p.z - lastSz) > 0.05 || Math.abs(norm2(yaw(o) - lastSyaw)) > 12) && now - lastStream > 400) {
+    lastStream = now; lastSx = p.x; lastSz = p.z; lastSyaw = yaw(o);
+    stream(`xr t=${((now - t0) / 1000).toFixed(1)} x=${p.x.toFixed(2)} z=${p.z.toFixed(2)} yaw=${yaw(o).toFixed(0)} ahead=${oa}`);
+  }
 }
 
 // ================= Autonomous roam + return-to-spot (VIO closed-loop) =================
 let target = null, navigating = false, roaming = false;
+const ADV = -1;        // "advance" = drive rear-first, so the rear tracking camera leads (faces travel dir)
+const STOP_M = 0.40;   // depth: stop when something is closer than this (meters) ahead
 const navstat = document.getElementById('navstat');
 const setNav = m => { navstat.textContent = 'nav: ' + m; };
 const zzz = ms => new Promise(r => setTimeout(r, ms));
@@ -192,12 +222,16 @@ async function roam() {
   setNav('roaming…'); stream('nav ROAM start');
   try {
     while (roaming && looi.connected) {
-      looi.hazard = null; looi.drive(85, 0);                  // smooth forward leg
+      looi.hazard = null; looi.drive(ADV * 85, 0);            // rear-first advance (camera leads)
       const legEnd = performance.now() + 1500 + Math.random() * 2000;
       let hit = false;
-      while (roaming && performance.now() < legEnd) { if (looi.hazard) { hit = true; break; } await zzz(60); }
+      while (roaming && performance.now() < legEnd) {
+        if (looi.hazard) { hit = 'cliff'; break; }
+        if (depthEnabled && obstacleAhead != null && obstacleAhead < STOP_M) { hit = 'depth ' + obstacleAhead.toFixed(2) + 'm'; break; }
+        await zzz(60);
+      }
       looi.stop(); if (!roaming) break;
-      if (hit) { stream('nav ROAM ' + looi.hazard); looi.drive(-85, 0); await zzz(600); looi.stop(); }
+      if (hit) { stream('nav ROAM stop:' + hit); looi.drive(-ADV * 85, 0); await zzz(600); looi.stop(); }
       const dir = Math.random() < 0.5 ? -1 : 1;               // explore a new heading
       looi.drive(0, dir * 95); await zzz(hit ? 700 + Math.random() * 700 : 300 + Math.random() * 500);
       looi.stop(); await zzz(150);
@@ -209,12 +243,16 @@ async function roam() {
 const rad = d => d / DEG;
 async function driveSeg(ms, spd = 85) {
   const a = { x: cur.x, z: cur.z }, yawA = cur.yaw;
-  looi.hazard = null; looi.drive(spd, 0);
-  const end = performance.now() + ms; let hit = false;
-  while (performance.now() < end) { if (looi.hazard) { hit = true; stream('nav HAZ ' + looi.hazard); break; } await zzz(40); }
+  looi.hazard = null; looi.drive(ADV * spd, 0);              // rear-first advance
+  const end = performance.now() + ms; let blocked = false;
+  while (performance.now() < end) {
+    if (looi.hazard) { blocked = 'cliff'; stream('nav HAZ ' + looi.hazard); break; }
+    if (depthEnabled && obstacleAhead != null && obstacleAhead < STOP_M) { blocked = 'depth'; stream('nav DEPTH-STOP ' + obstacleAhead.toFixed(2)); break; }
+    await zzz(40);
+  }
   looi.stop(); await zzz(350);                                // settle + let pose catch up
   const dx = cur.x - a.x, dz = cur.z - a.z, moved = Math.hypot(dx, dz);
-  return { moved, travel: moved > 0.10 ? Math.atan2(dx, dz) : null, yawA, hit };   // trust direction only on a real move
+  return { moved, travel: moved > 0.10 ? Math.atan2(dx, dz) : null, yawA, blocked };   // trust direction only on a real move
 }
 const turnCmd = async (dir, ms) => { looi.drive(0, dir * 90); await zzz(ms); looi.stop(); await zzz(350); };
 
@@ -252,7 +290,8 @@ async function goBack() {
         await turnCmd(Math.sign(err) * k * turnDirSign, Math.min(1000, Math.max(250, Math.abs(err) / Math.PI * 1200)));
       } else {
         const seg = await driveSeg(900);                       // big clean leg toward the spot
-        if (seg.moved < 0.05) { if (++stuck >= 3) { setNav('stuck — obstacle or lost tracking'); stream('nav STUCK'); break; } await turnCmd(turnDirSign, 450); }
+        if (seg.blocked) { setNav('obstacle → steering around'); stream('nav avoid-turn'); await turnCmd(turnDirSign, 500); }
+        else if (seg.moved < 0.05) { if (++stuck >= 3) { setNav('stuck — no motion/tracking'); stream('nav STUCK'); break; } await turnCmd(turnDirSign, 450); }
         else stuck = 0;
       }
     }
