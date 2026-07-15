@@ -277,9 +277,9 @@ export class Looi extends EventTarget {
   // ---- Anti-ram reflex: watch the phone IMU (bump) + robot cliff sensors, set this.hazard ----
   // The depth loop drives in short steps and bails the instant this.hazard fires. This is the
   // physical backstop for what the camera can't see (a blank wall inches away, a stair edge).
-  armHazardWatch({ bumpAbs = 2.2 } = {}) {
+  armHazardWatch({ bumpAbs = 2.2, cliff = true } = {}) {
     this.hazard = null;
-    let avg = null;
+    let avg = null, cliffPrev = false;
     this._hazMotion = e => {
       let a = e.acceleration;
       if (!a || a.x == null) a = e.accelerationIncludingGravity;   // some phones only give gravity-inclusive
@@ -293,11 +293,13 @@ export class Looi extends EventTarget {
     this._hazCliff = e => {                                        // FED9 '01 c1 c2 c3 c4': 1=on-surface, 0=drop/edge
       if (e.detail.key === '01') {
         const c = e.detail.bytes.slice(1);
-        if (c.length && c.some(b => b === 0)) this.hazard = 'cliff';
+        const drop = c.length && c.some(b => b === 0);
+        if (drop && cliffPrev) this.hazard = 'cliff';             // require 2 in a row → kills single-frame false drops
+        cliffPrev = drop;
       }
     };
     window.addEventListener('devicemotion', this._hazMotion);
-    this.addEventListener('telemetry', this._hazCliff);
+    if (cliff) this.addEventListener('telemetry', this._hazCliff);
   }
   disarmHazardWatch() {
     if (this._hazMotion) window.removeEventListener('devicemotion', this._hazMotion);

@@ -68,7 +68,7 @@
 </div>
 
 <script type="module">
-import { Looi } from './looi.js?v=33';
+import { Looi } from './looi.js?v=34';
 
 const looi = new Looi();
 const logEl = document.getElementById('log');
@@ -188,7 +188,7 @@ document.getElementById('stopnav').onclick = () => { roaming = navigating = fals
 async function roam() {
   if (roaming || navigating) return;
   if (!looi.connected) { setNav('connect body first'); return; }
-  roaming = true; looi.disarmHazardWatch(); looi.armHazardWatch({ bumpAbs: 3.0 });
+  roaming = true; looi.disarmHazardWatch(); looi.armHazardWatch({ bumpAbs: 5.0 });   // high → legs run full length (no false-bump stalls)
   setNav('roaming…'); stream('nav ROAM start');
   try {
     while (roaming && looi.connected) {
@@ -205,51 +205,58 @@ async function roam() {
   } finally { roaming = false; looi.stop(); if (!navigating) looi.disarmHazardWatch(); setNav('roam stopped'); }
 }
 
-// ---- Return to the saved spot: self-calibrating (measures heading from real motion) ----
-async function nudgeForward(ms = 550, spd = 82) {
-  const a = { x: cur.x, z: cur.z };
+// ---- Return to the saved spot: steer off the STABLE yaw (calibrated once), drive in big clean legs ----
+const rad = d => d / DEG;
+async function driveSeg(ms, spd = 85) {
+  const a = { x: cur.x, z: cur.z }, yawA = cur.yaw;
   looi.hazard = null; looi.drive(spd, 0);
   const end = performance.now() + ms; let hit = false;
-  while (performance.now() < end) { if (looi.hazard) { hit = true; break; } await zzz(40); }
-  looi.stop(); await zzz(300);                                // settle + let the pose catch up
+  while (performance.now() < end) { if (looi.hazard) { hit = true; stream('nav HAZ ' + looi.hazard); break; } await zzz(40); }
+  looi.stop(); await zzz(350);                                // settle + let pose catch up
   const dx = cur.x - a.x, dz = cur.z - a.z, moved = Math.hypot(dx, dz);
-  return { moved, heading: moved > 0.03 ? Math.atan2(dx, dz) : null, hit };
+  return { moved, travel: moved > 0.10 ? Math.atan2(dx, dz) : null, yawA, hit };   // trust direction only on a real move
 }
-const turnCmd = async (dir, ms) => { looi.drive(0, dir * 90); await zzz(ms); looi.stop(); await zzz(300); };
+const turnCmd = async (dir, ms) => { looi.drive(0, dir * 90); await zzz(ms); looi.stop(); await zzz(350); };
 
 async function goBack() {
   if (!target) { setNav('no spot saved yet'); return; }
   roaming = false; await zzz(200);
   if (!cur.ok) { setNav('no tracking'); return; }
-  navigating = true; looi.disarmHazardWatch(); looi.armHazardWatch({ bumpAbs: 3.2 });
+  navigating = true; looi.disarmHazardWatch(); looi.armHazardWatch({ bumpAbs: 5.5 });   // hazards are last-resort during nav
   setNav('calibrating…'); stream('nav GOBACK');
   try {
-    const c1 = await nudgeForward(650); if (!navigating) return;
-    if (c1.heading == null) { setNav('can\'t move/track — aborting'); stream('nav ABORT no-motion'); return; }
-    await turnCmd(1, 500); if (!navigating) return;
-    const c2 = await nudgeForward(650); if (!navigating) return;
-    let heading = c2.heading != null ? c2.heading : c1.heading;
-    const turnDirSign = (c2.heading != null && Math.sign(norm(c2.heading - c1.heading))) || 1;   // +cmd rotates heading which way
-    stream(`nav CAL turnDirSign=${turnDirSign} h1=${(c1.heading * DEG).toFixed(0)} h2=${c2.heading != null ? (c2.heading * DEG).toFixed(0) : 'na'}`);
+    // calibrate the yaw→heading map from two clean forward legs around a turn (yaw is stable; motion is not)
+    const s1 = await driveSeg(1100); if (!navigating) return;
+    if (s1.travel == null) { setNav('no clean motion — tilt camera to the room & retry'); stream('nav ABORT no-motion m=' + s1.moved.toFixed(2)); return; }
+    await turnCmd(1, 550); if (!navigating) return;
+    const s2 = await driveSeg(1100); if (!navigating) return;
+    let k = 1, turnDirSign = 1;
+    if (s2.travel != null) {
+      const dH = norm(s2.travel - s1.travel), dY = norm(rad(s2.yawA) - rad(s1.yawA));
+      k = (Math.sign(dH) === Math.sign(dY)) ? 1 : -1;          // does travel-dir rotate WITH yaw or against it
+      turnDirSign = Math.sign(dY) || 1;                        // which way +turn command moves yaw
+    }
+    const offset = norm(s1.travel - k * rad(s1.yawA));
+    const headingNow = () => norm(k * rad(cur.yaw) + offset);  // robot-forward direction, from the STABLE yaw
+    stream(`nav CAL k=${k} turnDirSign=${turnDirSign} offset=${(offset * DEG).toFixed(0)}`);
 
-    let guard = 0;
-    while (navigating && guard++ < 45) {
+    let guard = 0, stuck = 0;
+    while (navigating && guard++ < 40) {
       const d = distTo(target);
       setNav(`${d.toFixed(2)} m to spot`);
-      stream(`nav STEP d=${d.toFixed(3)} pos=${cur.x.toFixed(2)},${cur.z.toFixed(2)} head=${(heading * DEG).toFixed(0)}`);
-      if (d < 0.25) { setNav(`✔ ARRIVED (${d.toFixed(2)} m off)`); stream('nav ARRIVED d=' + d.toFixed(3)); break; }
+      stream(`nav STEP d=${d.toFixed(3)} pos=${cur.x.toFixed(2)},${cur.z.toFixed(2)} head=${(headingNow() * DEG).toFixed(0)}`);
+      if (d < 0.30) { setNav(`✔ ARRIVED (${d.toFixed(2)} m off)`); stream('nav ARRIVED d=' + d.toFixed(3)); break; }
       const bearing = Math.atan2(target.x - cur.x, target.z - cur.z);
-      const err = norm(bearing - heading);
-      if (Math.abs(err) > 25 / DEG) {                          // reorient toward the spot
-        await turnCmd(Math.sign(err) * turnDirSign, Math.min(1100, Math.max(250, Math.abs(err) / Math.PI * 1300)));
-        heading = norm(heading + err);                         // approx; the next nudge re-measures it truthfully
-      } else {                                                 // roughly aimed → drive, and re-measure heading from motion
-        const f = await nudgeForward(550);
-        if (f.heading != null) heading = f.heading;
-        else { stream('nav no-move → nudge-turn'); await turnCmd(turnDirSign, 450); }   // stalled → rotate to recover
+      const err = norm(bearing - headingNow());
+      if (Math.abs(err) > 22 / DEG) {                          // reorient — converges because heading is now stable
+        await turnCmd(Math.sign(err) * k * turnDirSign, Math.min(1000, Math.max(250, Math.abs(err) / Math.PI * 1200)));
+      } else {
+        const seg = await driveSeg(900);                       // big clean leg toward the spot
+        if (seg.moved < 0.05) { if (++stuck >= 3) { setNav('stuck — obstacle or lost tracking'); stream('nav STUCK'); break; } await turnCmd(turnDirSign, 450); }
+        else stuck = 0;
       }
     }
-    if (guard >= 45) { setNav('gave up after 45 steps'); stream('nav GIVEUP'); }
+    if (guard >= 40) { setNav('gave up after 40 steps'); stream('nav GIVEUP'); }
   } finally { navigating = false; looi.stop(); looi.disarmHazardWatch(); }
 }
 document.getElementById('roam').onclick = roam;
