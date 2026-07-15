@@ -59,6 +59,7 @@
       <button id="stopnav" style="flex:1 1 45%;background:#5a1e1e;border-color:#8a2a2a">◼ stop</button>
       <button id="voicebtn" style="flex:1 1 100%;background:#3d2a5f;border-color:#5c3b93">🎤 voice (say: roam / go back / stop)</button>
       <button id="capture" style="flex:1 1 100%;background:#1f4d4d;border-color:#2ea0a0">📸 capture (camera + pose + depth → Claude)</button>
+      <button id="claudebtn" style="flex:1 1 100%;background:#4d3a1f;border-color:#a0752e">🎮 hand control to Claude</button>
     </div>
     <div id="xrdrive">
       <button></button><button class="drive" data-d="fwd">▲ fwd</button><button></button>
@@ -130,7 +131,7 @@ let xrSession = null, xrRefSpace = null, lost = false, t0 = 0, samples = 0;
 let cur = { x: 0, z: 0, yaw: 0, ok: false };                  // latest VIO pose (updated every frame)
 let obstacleAhead = null, obstacleT = 0, depthEnabled = false, depthErr = false;   // depth ahead (m) from the AR camera
 let lastSx = 0, lastSz = 0, lastSyaw = 0;                     // last-streamed pose, for change-based logging
-let xrGL = null, xrBinding = null, wantCapture = 0, capN = 0;   // diagnostic capture (camera readback + depth + pose)
+let xrGL = null, xrBinding = null, capReq = null, capN = 0, remoteMode = false;   // capture + Claude remote-control
 function yaw(q) { return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x)) * 180 / Math.PI; }
 const norm2 = a => { while (a > 180) a -= 360; while (a < -180) a += 360; return a; };   // wrap degrees
 const obAhead = () => (obstacleAhead != null && performance.now() - obstacleT < 600) ? obstacleAhead : null;   // fresh depth only — no stale
@@ -190,14 +191,13 @@ function onFrame(t, frame) {
     } catch (e) { if (!depthErr) { depthErr = true; log('depth read err: ' + e.message, 'warn'); } }
   }
   // --- diagnostic capture: grab camera image + depth grid + pose NOW (texture only valid this frame) ---
-  if (wantCapture) {
+  if (capReq) {
     const view = pose.views[0];
     let img = null, grid = '(no depth)';
     try { if (depthEnabled) { const di = frame.getDepthInformation(view); if (di) grid = depthGrid(di); } } catch (e) {}
-    try { img = grabCam(view); } catch (e) { log('cam grab err: ' + e.message, 'warn'); }
-    sendDiag(wantCapture, img, grid, { x: +p.x.toFixed(3), z: +p.z.toFixed(3), yaw: +yaw(o).toFixed(1), ahead: obAhead() });
-    log('capture #' + wantCapture + (img ? ' (with image)' : ' (NO image)'), img ? 'ok' : 'warn');
-    wantCapture = 0;
+    try { img = grabCam(view); } catch (e) {}
+    postObs(capReq.label, img, grid, { x: +p.x.toFixed(3), z: +p.z.toFixed(3), yaw: +yaw(o).toFixed(1), ahead: obAhead() });
+    capReq = null;
   }
   const dist = Math.hypot(p.x, p.z);
   const oa = obAhead() != null ? obAhead().toFixed(2) + 'm' : '—';
@@ -342,8 +342,38 @@ document.getElementById('voicebtn').onclick = () => {
   r.start();
 };
 
-// ---- Diagnostic capture: camera image + depth grid + pose → brain, for Claude to inspect ----
-document.getElementById('capture').onclick = () => { if (!cur.ok) { setNav('no tracking — can\'t capture'); return; } capN++; wantCapture = capN; setNav('capturing #' + capN + '…'); };
+// ---- Diagnostic capture + Claude remote control ----
+document.getElementById('capture').onclick = () => { if (!cur.ok) { setNav('no tracking — can\'t capture'); return; } capReq = { label: 'cap' + (++capN) }; setNav('capturing…'); };
+
+// Hand control to Claude: poll the brain for commands, execute, report an observation (image+pose+depth) back
+document.getElementById('claudebtn').onclick = () => {
+  if (remoteMode) { remoteMode = false; looi.stop(); setNav('Claude control OFF'); return; }
+  if (!xrSession) { setNav('start AR first'); return; }
+  remoteMode = true; setNav('🎮 Claude driving — supervise it'); log('remote control ON', 'ok'); remoteLoop();
+};
+async function remoteLoop() {
+  while (remoteMode && xrSession) {
+    let cmd = null;
+    try { const r = await fetch(BRAIN + '/next-cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); if (r.ok) cmd = await r.json(); } catch (e) {}
+    if (cmd && cmd.action) await execCmd(cmd); else await zzz(300);
+  }
+}
+async function execCmd(cmd) {
+  const a = cmd.action, ms = cmd.ms || 400, spd = cmd.spd || 80;
+  setNav('▶ ' + a + ' ' + ms + 'ms');
+  if (a === 'fwd') { looi.drive(ADV * spd, 0); await zzz(ms); looi.stop(); }
+  else if (a === 'back') { looi.drive(-ADV * spd, 0); await zzz(ms); looi.stop(); }
+  else if (a === 'left') { looi.drive(0, -spd - 10); await zzz(ms); looi.stop(); }
+  else if (a === 'right') { looi.drive(0, spd + 10); await zzz(ms); looi.stop(); }
+  else if (a === 'stop') { looi.stop(); }
+  // 'capture' / anything else → just observe
+  await zzz(350);                                              // settle + let pose/depth update, then grab an observation
+  capReq = { label: 'after:' + a + '/' + ms };                // onFrame grabs image+depth+pose → posts to /obs
+}
+async function postObs(label, image, depth, pose) {
+  try { await fetch(BRAIN + '/obs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label, image, depth, pose }) }); setNav('obs ' + label + (image ? ' 📷' : ' (no img)')); }
+  catch (e) { setNav('obs send err: ' + e.message); }
+}
 
 function depthGrid(di) {                                       // sample depth (m) over a grid: rows=top→bottom, cols=left→right of the view
   const rows = [];
