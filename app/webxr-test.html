@@ -58,6 +58,7 @@
       <button id="gospot" style="flex:1 1 45%;background:#1d3a5f;border-color:#2b5c93">➤ go back</button>
       <button id="stopnav" style="flex:1 1 45%;background:#5a1e1e;border-color:#8a2a2a">◼ stop</button>
       <button id="voicebtn" style="flex:1 1 100%;background:#3d2a5f;border-color:#5c3b93">🎤 voice (say: roam / go back / stop)</button>
+      <button id="capture" style="flex:1 1 100%;background:#1f4d4d;border-color:#2ea0a0">📸 capture (camera + pose + depth → Claude)</button>
     </div>
     <div id="xrdrive">
       <button></button><button class="drive" data-d="fwd">▲ fwd</button><button></button>
@@ -129,6 +130,7 @@ let xrSession = null, xrRefSpace = null, lost = false, t0 = 0, samples = 0;
 let cur = { x: 0, z: 0, yaw: 0, ok: false };                  // latest VIO pose (updated every frame)
 let obstacleAhead = null, obstacleT = 0, depthEnabled = false, depthErr = false;   // depth ahead (m) from the AR camera
 let lastSx = 0, lastSz = 0, lastSyaw = 0;                     // last-streamed pose, for change-based logging
+let xrGL = null, xrBinding = null, wantCapture = 0, capN = 0;   // diagnostic capture (camera readback + depth + pose)
 function yaw(q) { return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x)) * 180 / Math.PI; }
 const norm2 = a => { while (a > 180) a -= 360; while (a < -180) a += 360; return a; };   // wrap degrees
 const obAhead = () => (obstacleAhead != null && performance.now() - obstacleT < 600) ? obstacleAhead : null;   // fresh depth only — no stale
@@ -152,6 +154,8 @@ document.getElementById('start').onclick = async () => {
   overlay.classList.add('on');
   await gl.makeXRCompatible();
   xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
+  xrGL = gl;
+  try { xrBinding = new XRWebGLBinding(xrSession, gl); } catch (e) { log('no XRWebGLBinding: ' + e.message, 'warn'); }
   try { xrRefSpace = await xrSession.requestReferenceSpace('local-floor'); log('ref space: local-floor', 'ok'); }
   catch { xrRefSpace = await xrSession.requestReferenceSpace('local'); log('ref space: local (no floor)', 'warn'); }
   xrSession.addEventListener('end', () => { overlay.classList.remove('on'); xrSession = null; log(`AR ended (${samples} pose samples)`, 'warn'); stream(`xr END samples=${samples}`); flush(); });
@@ -184,6 +188,16 @@ function onFrame(t, frame) {
         if (obstacleAhead != null) obstacleT = performance.now();   // timestamp for freshness
       }
     } catch (e) { if (!depthErr) { depthErr = true; log('depth read err: ' + e.message, 'warn'); } }
+  }
+  // --- diagnostic capture: grab camera image + depth grid + pose NOW (texture only valid this frame) ---
+  if (wantCapture) {
+    const view = pose.views[0];
+    let img = null, grid = '(no depth)';
+    try { if (depthEnabled) { const di = frame.getDepthInformation(view); if (di) grid = depthGrid(di); } } catch (e) {}
+    try { img = grabCam(view); } catch (e) { log('cam grab err: ' + e.message, 'warn'); }
+    sendDiag(wantCapture, img, grid, { x: +p.x.toFixed(3), z: +p.z.toFixed(3), yaw: +yaw(o).toFixed(1), ahead: obAhead() });
+    log('capture #' + wantCapture + (img ? ' (with image)' : ' (NO image)'), img ? 'ok' : 'warn');
+    wantCapture = 0;
   }
   const dist = Math.hypot(p.x, p.z);
   const oa = obAhead() != null ? obAhead().toFixed(2) + 'm' : '—';
@@ -328,7 +342,52 @@ document.getElementById('voicebtn').onclick = () => {
   r.start();
 };
 
-log('ready. 1) Connect body  2) Check WebXR  3) Start AR tracking. Then: save spot → roam → go back. (Chrome + ARCore + Tailscale on.)');
+// ---- Diagnostic capture: camera image + depth grid + pose → brain, for Claude to inspect ----
+document.getElementById('capture').onclick = () => { if (!cur.ok) { setNav('no tracking — can\'t capture'); return; } capN++; wantCapture = capN; setNav('capturing #' + capN + '…'); };
+
+function depthGrid(di) {                                       // sample depth (m) over a grid: rows=top→bottom, cols=left→right of the view
+  const rows = [];
+  for (let gy = 0.05; gy <= 0.96; gy += 0.15) {
+    const row = [];
+    for (let gx = 0.05; gx <= 0.96; gx += 0.1) {
+      let m = NaN; try { m = di.getDepthInMeters(gx, gy); } catch (e) {}
+      row.push((isFinite(m) && m > 0) ? m.toFixed(2).padStart(5) : '  -- ');
+    }
+    rows.push(row.join(' '));
+  }
+  return rows.join('\n');
+}
+
+function grabCam(view) {                                       // read the AR camera texture back to a JPEG (best-effort)
+  if (!view.camera || !xrBinding || !xrGL) return null;
+  const gl = xrGL, cam = view.camera, w = cam.width, h = cam.height;
+  const tex = xrBinding.getCameraImage(cam);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  let data = null;
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) { data = new Uint8Array(w * h * 4); gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, data); }
+  else stream('diag: camera FBO incomplete (external texture — needs shader path)');
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(fb);
+  if (!data) return null;
+  const full = document.createElement('canvas'); full.width = w; full.height = h;
+  const fctx = full.getContext('2d'), id = fctx.createImageData(w, h);
+  for (let y = 0; y < h; y++) { const s = (h - 1 - y) * w * 4; id.data.set(data.subarray(s, s + w * 4), y * w * 4); }   // flip Y (GL is bottom-up)
+  fctx.putImageData(id, 0, 0);
+  const sw = 480, sh = Math.round(h * 480 / w);
+  const sc = document.createElement('canvas'); sc.width = sw; sc.height = sh;
+  sc.getContext('2d').drawImage(full, 0, 0, sw, sh);
+  return sc.toDataURL('image/jpeg', 0.6).split(',')[1];
+}
+
+async function sendDiag(n, image, depth, pose) {
+  try {
+    const r = await fetch(BRAIN + '/diag', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ n, image, depth, pose, note: 'cap' + n }) });
+    setNav(r.ok ? `capture #${n} sent ✓ ${image ? '(img)' : '(no img)'}` : `capture #${n} HTTP ${r.status}`);
+  } catch (e) { setNav('capture send err: ' + e.message); }
+}
+
+log('ready. 1) Connect body  2) Check WebXR  3) Start AR tracking. Then 📸 capture (move slightly, capture again). (Chrome + ARCore + Tailscale on.)');
 </script>
 </body>
 </html>
