@@ -188,7 +188,7 @@ document.getElementById('stopnav').onclick = () => { roaming = navigating = fals
 async function roam() {
   if (roaming || navigating) return;
   if (!looi.connected) { setNav('connect body first'); return; }
-  roaming = true; looi.disarmHazardWatch(); looi.armHazardWatch({ bumpAbs: 5.0 });   // high → legs run full length (no false-bump stalls)
+  roaming = true; looi.disarmHazardWatch(); looi.armHazardWatch({ bumpAbs: 50 });   // bump OFF (it only detects drive-vibration); cliff still guards drops
   setNav('roaming…'); stream('nav ROAM start');
   try {
     while (roaming && looi.connected) {
@@ -222,7 +222,7 @@ async function goBack() {
   if (!target) { setNav('no spot saved yet'); return; }
   roaming = false; await zzz(200);
   if (!cur.ok) { setNav('no tracking'); return; }
-  navigating = true; looi.disarmHazardWatch(); looi.armHazardWatch({ bumpAbs: 5.5 });   // hazards are last-resort during nav
+  navigating = true; looi.disarmHazardWatch(); looi.armHazardWatch({ bumpAbs: 50 });   // bump OFF (drive-vibration noise); cliff still guards drops
   setNav('calibrating…'); stream('nav GOBACK');
   try {
     // calibrate the yaw→heading map from two clean forward legs around a turn (yaw is stable; motion is not)
